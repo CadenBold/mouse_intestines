@@ -1,0 +1,1304 @@
+---
+title: "RNA Seq"
+output: html_notebook
+---
+
+# First Load All Libraries
+```{r}
+library(limma)
+library(DESeq2)
+library(ggplot2)
+library(tidyverse)
+library(readr)
+library(ggrepel)
+library(clusterProfiler)
+library(org.Mm.eg.db)   # change to org.Hs.eg.db if human
+library(enrichplot)
+library(DOSE)
+```
+
+# Check Files are Loaded in and begin cleaning of them
+```{r}
+# Check head of read in files, and then ccreate copies ot modify
+head(metadata)
+head(FastP_featurecounts)
+meta <- metadata
+fc <- FastP_featurecounts[-1,]
+
+head(fc)
+
+# Cleaning for a matrix of only numbers
+count_matrix <- fc[,-(2:6)]
+colnames(count_matrix) <- count_matrix[1,]
+count_matrix <- count_matrix[-1,]
+
+
+count_matrix <- count_matrix %>%
+  column_to_rownames("Geneid")
+# Check count_matrix is correct
+head(count_matrix)
+
+# Correct unique grouping so that we can quickly split on it
+meta <- meta %>%
+  mutate(
+    GroupID = group_indices(., Age, Exposure, Diet, Treatment)
+  )
+
+meta %>%
+  distinct(Age, Exposure, Diet, Treatment, GroupID) %>%
+  arrange(GroupID)
+
+count_matrix <- as.matrix(count_matrix)
+storage.mode(count_matrix) <- "numeric"
+
+mode(count_matrix)
+is.numeric(count_matrix)
+anyNA(count_matrix)
+
+```
+Now we want to compute basic DESeq2 Object and Limma Object, with transforms of scale and quantile.
+```{r}
+# Run DESeq2 Object along with most result important genes, along with variance transform
+dds <- DESeqDataSetFromMatrix(
+  countData = count_matrix,
+  colData   = metadata,
+  design    = ~ Age + Exposure + Diet + Treatment
+)
+
+#Potential Filtering Option
+dds_filt <- dds[rowSums(counts(dds)) >= 10, ]
+
+dds <- DESeq(dds)
+dds_filt <- DESeq(dds_filt)
+
+res <- results(dds)
+
+res <- res[order(res$padj),]
+head(res)
+
+vsd <- vst(dds, blind=FALSE)
+vst <- assay(vsd)
+
+vsd_filt <- vst(dds_filt, blind=FALSE)
+vst_filt <- assay(vsd_filt)
+```
+Exporting VST to CSV
+```{r}
+vst_df <- as.data.frame(vst)
+head(vst_df)
+
+vst_filt_df <- as.data.frame(vst_filt)
+head(vst_filt_df)
+#write.csv(vsd, "DESeq_VST.csv",row.names = TRUE)
+#write.csv(vst_filt, "DESeq_Filtered_VST.csv", row.names = TRUE)
+```
+
+
+Limma Array Initializing
+```{r}
+log_counts <- log2(count_matrix+1)
+
+qn_log_counts <- normalizeBetweenArrays(
+     log_counts,
+     method = "quantile")
+```
+
+Cleaning the rownames of the Meta Dataframe
+```{r}
+meta <- as.data.frame(meta)
+meta$SampleID <- sprintf("Yim-%03d", as.integer(rownames(meta)))
+rownames(meta) <- meta$SampleID
+meta$SampleID <- NULL
+
+meta
+
+```
+We want to do Density Plots for the Raw Counts, DESeq2 VST Counts, and the QN_Log_Counts
+```{r}
+outliers <- c("Yim-009","Yim-015","Yim-058","Yim-048","Yim-071","Yim-006","Yim-017",
+              "Yim-045","Yim-034","Yim-039")
+
+plot_density_with_colored_outliers <- function(mat, title,
+                                               log_transform = FALSE,
+                                               xlim_zoom = NULL,
+                                               ylim_zoom = NULL) {
+  
+  df <- as.data.frame(mat)
+  df$Gene <- rownames(df)
+  
+  df_long <- df %>%
+    pivot_longer(
+      cols = -Gene,
+      names_to = "Sample",
+      values_to = "Value"
+    ) %>%
+    mutate(
+      ColorGroup = ifelse(Sample %in% outliers, Sample, "Other"),
+      PlotValue = if (log_transform) log2(Value + 1) else Value
+    ) %>%
+    arrange(ColorGroup == "Other")  # gray lines first, outliers on top
+
+  p <- ggplot(df_long, aes(x = PlotValue, group = Sample, color = ColorGroup)) +
+    geom_density(linewidth = 0.8) +  # lines only
+    scale_color_manual(
+      values = c(
+        "Other" = "grey80",
+        setNames(scales::hue_pal()(length(outliers)), outliers)
+      )
+    ) +
+    # filled legend trick
+    guides(color = guide_legend(
+      override.aes = list(linetype = 0, shape = 22, fill = c("grey80", scales::hue_pal()(length(outliers))))
+    )) +
+    labs(
+      title = title,
+      x = if (log_transform) "log2(count + 1)" else "Expression",
+      y = "Density",
+      color = "Sample"
+    ) +
+    theme_classic() +
+    theme(plot.title = element_text(face = "bold"))
+  
+  if (!is.null(xlim_zoom) || !is.null(ylim_zoom)) {
+    p <- p + coord_cartesian(xlim = xlim_zoom, ylim = ylim_zoom)
+  }
+  
+  return(p)
+}
+
+
+
+
+plot_density_with_colored_outliers(
+  mat = count_matrix,
+  title = "Raw Counts Density",
+  log_transform = TRUE,
+  xlim_zoom = c(0, 3),
+  ylim_zoom = c(0, 0.175)
+)
+
+plot_density_with_colored_outliers(
+  mat = vsd,
+  title = "VST Density (DESeq2 Variance Stabilized Transform)",
+  log_transform = FALSE,
+  xlim_zoom = c(5, 6),
+  ylim_zoom = c(0, 0.6)
+)
+
+plot_density_with_colored_outliers(
+  mat = qn_log_counts,
+  title = "Quantile-Normalized Log Density",
+  log_transform = FALSE,
+  xlim_zoom = c(0, 3),
+  ylim_zoom = c(0, 0.2)
+)
+
+
+```
+Computing PCA for DESeq Filtered
+```{r}
+
+pca_input <- t(vst_filt)
+
+any(apply(pca_input, 2, var) == 0)
+
+
+pca <- prcomp(pca_input, center = TRUE, scale. = TRUE)
+
+pca_df <- data.frame(
+  Sample = rownames(pca$x),
+  PC1 = pca$x[, 1],
+  PC2 = pca$x[, 2],
+  metadata[rownames(pca$x), ]
+)
+
+pve <- pca$sdev^2 / sum(pca$sdev^2)
+pve[1:5]
+
+
+plot(
+  pca_df$PC1, pca_df$PC2,
+  xlab = paste0("PC1 (", round(pve[1] * 100, 1), "%)"),
+  ylab = paste0("PC2 (", round(pve[2] * 100, 1), "%)"),
+  pch = 19
+)
+
+pca_df$Outlier <- with(
+  pca_df,
+  abs(scale(PC1)) > 2 | abs(scale(PC2)) > 2
+)
+
+pca_df$GroupFactor <- meta[rownames(pca_df), "Group"]
+#pca_df$GroupFactor <- factor(pca_df$GroupID)
+
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = GroupFactor)) +
+  geom_point(size = 3, alpha = 0.9) +
+  geom_text_repel(
+    data = subset(pca_df, Outlier),
+    aes(label = Sample),
+    size = 3,
+    max.overlaps = Inf
+  ) +
+  labs(
+    x = paste0("PC1 (", round(pve[1] * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pve[2] * 100, 1), "%)"),
+    color = "Group",
+    title="PCA of 8 Groups",
+    subtitle="DESeq Filtered Beforehand"
+  ) +
+  theme_classic()
+
+
+```
+
+Computing Saline PCA with DESeq Filtered
+```{r}
+keep<- !(
+  rownames(meta) == "Yim-009" |
+  meta$Treatment == "rs"
+)
+
+meta_sub <- meta[keep, ]
+vst_filt_sub <- vst_filt[, rownames(meta_sub)]
+
+pca_input <- t(vst_filt_sub)
+
+pca <- prcomp(pca_input, center = TRUE, scale. = TRUE)
+
+pca_df <- data.frame(
+  Sample = rownames(pca$x),
+  PC1 = pca$x[, 1],
+  PC2 = pca$x[, 2],
+  meta_sub[rownames(pca$x), ]
+)
+
+pve <- (pca$sdev^2) / sum(pca$sdev^2)
+
+pca_df$GroupFactor <- interaction(
+  pca_df$Age,
+  pca_df$Exposure,
+  pca_df$Diet,
+  pca_df$Treatment,
+  drop = TRUE
+)
+
+pca_df$Outlier <- with(
+  pca_df,
+  abs(scale(PC1)) > 2 | abs(scale(PC2)) > 2
+)
+
+
+ggplot(pca_df, aes(PC1, PC2, color = GroupFactor)) +
+  geom_point(size = 3, alpha = 0.9) +
+  geom_text_repel(
+    data = subset(pca_df, Outlier),
+    aes(label = Sample),
+    size = 3,
+    max.overlaps = Inf
+  ) +
+  labs(
+    x = paste0("PC1 (", round(pve[1] * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pve[2] * 100, 1), "%)"),
+    color = "Group",
+    title="PCA of DESeq Filtered Saline Data",
+    subtitle="Sample 9 is removed for Clarity"
+  ) +
+  theme_classic()
+```
+
+Computing Saline PCA with Sample 9 in it with DESeq Filtered
+```{r}
+keep<- !(
+  meta$Treatment == "rs"
+)
+
+meta_sub <- meta[keep, ]
+vst_filt_sub <- vst_filt[, rownames(meta_sub)]
+
+pca_input <- t(vst_filt_sub)
+
+pca <- prcomp(pca_input, center = TRUE, scale. = TRUE)
+
+pca_df <- data.frame(
+  Sample = rownames(pca$x),
+  PC1 = pca$x[, 1],
+  PC2 = pca$x[, 2],
+  meta_sub[rownames(pca$x), ]
+)
+
+pve <- (pca$sdev^2) / sum(pca$sdev^2)
+
+pca_df$GroupFactor <- interaction(
+  pca_df$Age,
+  pca_df$Exposure,
+  pca_df$Diet,
+  pca_df$Treatment,
+  drop = TRUE
+)
+
+pca_df$Outlier <- with(
+  pca_df,
+  abs(scale(PC1)) > 2 | abs(scale(PC2)) > 2
+)
+
+
+ggplot(pca_df, aes(PC1, PC2, color = GroupFactor)) +
+  geom_point(size = 3, alpha = 0.9) +
+  geom_text_repel(
+    data = subset(pca_df, Outlier),
+    aes(label = Sample),
+    size = 3,
+    max.overlaps = Inf
+  ) +
+  labs(
+    x = paste0("PC1 (", round(pve[1] * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pve[2] * 100, 1), "%)"),
+    color = "Group",
+    title="PCA of DESeq Filtered Saline Data",
+    subtitle="Sample 9 is not removed"
+  ) +
+  theme_classic()
+```
+
+
+Computing PCA for Quantile Normalization
+```{r}
+dim(qn_log_counts)              # genes x samples
+mode(qn_log_counts)             # should be "numeric"
+anyNA(qn_log_counts)            # should be FALSE
+
+gene_var <- apply(qn_log_counts, 1, var)
+
+qn_log_filt <- qn_log_counts[gene_var > 1e-8, ]
+
+pca_input <- t(qn_log_filt)
+
+any(apply(pca_input, 2, var) == 0)
+
+
+pca <- prcomp(pca_input, center = TRUE, scale. = TRUE)
+
+pca_df <- data.frame(
+  Sample = rownames(pca$x),
+  PC1 = pca$x[, 1],
+  PC2 = pca$x[, 2],
+  metadata[rownames(pca$x), ]
+)
+
+pve <- pca$sdev^2 / sum(pca$sdev^2)
+pve[1:5]
+
+
+plot(
+  pca_df$PC1, pca_df$PC2,
+  xlab = paste0("PC1 (", round(pve[1] * 100, 1), "%)"),
+  ylab = paste0("PC2 (", round(pve[2] * 100, 1), "%)"),
+  pch = 19
+)
+
+pca_df$Outlier <- with(
+  pca_df,
+  abs(scale(PC1)) > 2 | abs(scale(PC2)) > 2
+)
+
+pca_df$GroupFactor <- meta[rownames(pca_df), "Group"]
+#pca_df$GroupFactor <- factor(pca_df$GroupID)
+
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = GroupFactor)) +
+  geom_point(size = 3, alpha = 0.9) +
+  geom_text_repel(
+    data = subset(pca_df, Outlier),
+    aes(label = Sample),
+    size = 3,
+    max.overlaps = Inf
+  ) +
+  labs(
+    x = paste0("PC1 (", round(pve[1] * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pve[2] * 100, 1), "%)"),
+    color = "Group",
+    title="PCA of 8 Groups",
+    subtitle="Sample 9 Included along with Ages"
+  ) +
+  theme_classic()
+
+
+```
+
+PCA of Quantile with Sample 9 removed
+```{r}
+keep<- !(
+  rownames(meta) == "Yim-009" |
+  meta$Treatment == "rs"
+)
+
+meta_sub <- meta[keep, ]
+qn_sub <- qn_log_counts[, rownames(meta_sub)]
+
+gene_var <- apply(qn_sub, 1, var)
+qn_sub_filt <- qn_sub[gene_var > 1e-8, ]
+
+pca_input <- t(qn_sub_filt)
+
+stopifnot(!any(apply(pca_input, 2, var) == 0))
+
+pca <- prcomp(pca_input, center = TRUE, scale. = TRUE)
+
+pca_df <- data.frame(
+  Sample = rownames(pca$x),
+  PC1 = pca$x[, 1],
+  PC2 = pca$x[, 2],
+  meta_sub[rownames(pca$x), ]
+)
+
+pve <- (pca$sdev^2) / sum(pca$sdev^2)
+
+pca_df$GroupFactor <- interaction(
+  pca_df$Age,
+  pca_df$Exposure,
+  pca_df$Diet,
+  pca_df$Treatment,
+  drop = TRUE
+)
+
+pca_df$Outlier <- with(
+  pca_df,
+  abs(scale(PC1)) > 2 | abs(scale(PC2)) > 2
+)
+
+
+ggplot(pca_df, aes(PC1, PC2, color = GroupFactor)) +
+  geom_point(size = 3, alpha = 0.9) +
+  geom_text_repel(
+    data = subset(pca_df, Outlier),
+    aes(label = Sample),
+    size = 3,
+    max.overlaps = Inf
+  ) +
+  labs(
+    x = paste0("PC1 (", round(pve[1] * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pve[2] * 100, 1), "%)"),
+    color = "Group",
+    title="PCA of Quantile Normalized Saline Data",
+    subtitle="Sample 9 is Removed for Clarity"
+  ) +
+  theme_classic()
+```
+
+Having PCA with sample 9 in it
+```{r}
+keep<- !(
+  meta$Treatment == "rs"
+)
+
+meta_sub <- meta[keep, ]
+qn_sub <- qn_log_counts[, rownames(meta_sub)]
+
+gene_var <- apply(qn_sub, 1, var)
+qn_sub_filt <- qn_sub[gene_var > 1e-8, ]
+
+pca_input <- t(qn_sub_filt)
+
+stopifnot(!any(apply(pca_input, 2, var) == 0))
+
+pca <- prcomp(pca_input, center = TRUE, scale. = TRUE)
+
+pca_df <- data.frame(
+  Sample = rownames(pca$x),
+  PC1 = pca$x[, 1],
+  PC2 = pca$x[, 2],
+  meta_sub[rownames(pca$x), ]
+)
+
+pve <- (pca$sdev^2) / sum(pca$sdev^2)
+
+pca_df$GroupFactor <- interaction(
+  pca_df$Age,
+  pca_df$Exposure,
+  pca_df$Diet,
+  pca_df$Treatment,
+  drop = TRUE
+)
+
+pca_df$Outlier <- with(
+  pca_df,
+  abs(scale(PC1)) > 2 | abs(scale(PC2)) > 2
+)
+
+
+ggplot(pca_df, aes(PC1, PC2, color = GroupFactor)) +
+  geom_point(size = 3, alpha = 0.9) +
+  geom_text_repel(
+    data = subset(pca_df, Outlier),
+    aes(label = Sample),
+    size = 3,
+    max.overlaps = Inf
+  ) +
+  labs(
+    x = paste0("PC1 (", round(pve[1] * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pve[2] * 100, 1), "%)"),
+    color = "Group",
+    title="PCA of Quantile Normalized Saline Data",
+    subtitle="Sample 9 is is not removed"
+  ) +
+  theme_classic()
+
+```
+Now we will extract these PCA loadings, and get the most important genes from them.
+```{r}
+loadings <- as.data.frame(pca$rotation[, 1:2])
+colnames(loadings) <- c("PC1", "PC2")
+loadings$GeneID <- rownames(loadings)
+
+top_pc1 <- loadings |>
+  dplyr::arrange(desc(abs(PC1))) |>
+  dplyr::slice(1:20)
+
+top_pc2 <- loadings |>
+  dplyr::arrange(desc(abs(PC2))) |>
+  dplyr::slice(1:20)
+
+top_pc1$Direction <- ifelse(top_pc1$PC1 > 0, "Positive", "Negative")
+top_pc2$Direction <- ifelse(top_pc2$PC2 > 0, "Positive", "Negative")
+
+pc1_genes <- top_pc1$GeneID
+pc2_genes <- top_pc2$GeneID
+
+#cat(pc1_genes,sep="\n")
+#print("DIVIDER\n")
+#cat(pc2_genes,sep="\n")
+
+pc1_gene_names <- c("Myh9",
+"Rnf11",
+"Cltc",
+"Col4a1",
+"Slc10a1",
+"Iqgap1",
+"Scrn2",
+"Cfap68",
+"Hsd11b1",
+"Actr2",
+"Agfg1",
+"Mrps35",
+"Sqstm1",
+"Fat1",
+"Ctnnb1",
+"Aamdc",
+"Flna",
+"Nme3",
+"BC024139",
+"Ces3b")
+
+pc2_gene_names <- c("Fhit",
+"Arhgef16",
+"Qprt",
+"Hectd1",
+"Mfsd12",
+"Eno1",
+"Dera",
+"Acadm",
+"Gm70036",
+"Nudt7",
+"Hsd17b6",
+"Cndp2",
+"Napa",
+"Klk1b4",
+"Tmem86b",
+"Dnaja3",
+"Pgd",
+"Frmd8",
+"Slc23a1",
+"Pcbd1")
+
+top_pc1$GeneName <- pc1_gene_names
+top_pc2$GeneName <- pc2_gene_names
+
+top_pc1$Magnitude <- abs(top_pc1$PC1)
+top_pc2$Magnitude <- abs(top_pc2$PC2)
+
+top_pc1$GeneName <- reorder(
+  top_pc1$GeneName,
+  top_pc1$Magnitude
+)
+
+top_pc2$GeneName <- reorder(
+  top_pc2$GeneName,
+  top_pc2$Magnitude
+)
+
+ggplot(top_pc1,
+       aes(x = GeneName, y = Magnitude, fill = Direction)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_manual(values = c(
+    "Positive" = "blue",
+    "Negative" = "red"
+  )) +
+  labs(
+    x = "Gene",
+    y = "PC1 Loading",
+    title = "Top Genes Driving PC1"
+  ) +
+  theme_classic()
+
+ggplot(top_pc2,
+       aes(x = GeneName, y = Magnitude, fill = Direction)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_manual(values = c(
+    "Positive" = "blue",
+    "Negative" = "red"
+  )) +
+  labs(
+    x = "Gene",
+    y = "PC2 Loading",
+    title = "Top Genes Driving PC2"
+  ) +
+  theme_classic()
+
+```
+
+This is the point where we will now start comparing between ages and then the differences from these and groups. We will start with just using DESeq
+```{r}
+dds_ctrl <- dds_filt[, dds_filt$Group == "FAPDsa"]
+
+design(dds_ctrl) <- ~ Age
+dds_ctrl <- DESeq(dds_ctrl)
+
+head(dds_ctrl)
+
+res_ctrl_time <- results(dds_ctrl, contrast = c("Age", "1 day", "28 day"))
+res_ctrl_time <- res_ctrl_time[order(res_ctrl_time$padj), ]
+head(res_ctrl_time)
+
+sig <- subset(res_ctrl_time, padj < 0.05)
+
+up   <- sig[sig$log2FoldChange > 0, ]
+down <- sig[sig$log2FoldChange < 0, ]
+
+```
+
+We will now create a function so that we can quickly run the DESeq Object with whatever new group we would like to test.
+```{r}
+run_age_comparison <- function(dds, control_group, test_group, age_col = "Age", group_col = "Group") {
+
+  # -------------------------
+  # Subset to the two groups
+  # -------------------------
+  keep <- dds[[group_col]] %in% c(control_group, test_group)
+  dds_sub <- dds[, keep]
+
+  # Drop unused factor levels  ✅ FIX FOR droplevels ERROR
+  colData(dds_sub)[[group_col]] <- droplevels(factor(colData(dds_sub)[[group_col]]))
+  colData(dds_sub)[[age_col]]   <- droplevels(factor(colData(dds_sub)[[age_col]]))
+
+  # Set control as reference
+  colData(dds_sub)[[group_col]] <- relevel(colData(dds_sub)[[group_col]], ref = control_group)
+
+  # -------------------------
+  # Design
+  # -------------------------
+  design(dds_sub) <- as.formula(paste("~", age_col, "+", group_col, "+", paste0(age_col, ":", group_col)))
+
+  dds_sub <- DESeq(dds_sub)
+  print(resultsNames(dds_sub))
+
+  rn <- resultsNames(dds_sub)
+
+  age_name <- rn[grepl(paste0("^", age_col, "_"), rn)]
+  interaction_name <- rn[grepl(paste0(age_col, ".*", group_col), rn)]
+
+
+  # -------------------------
+  # Results
+  # -------------------------
+  res_ctrl_age <- results(dds_sub, name = age_name)
+
+  res_interaction <- results(dds_sub, name = interaction_name)
+
+  res_test_age <- results(dds_sub, contrast = list(c(age_name, interaction_name)))
+
+  return(list(
+    dds = dds_sub,
+    res_ctrl_age = res_ctrl_age,
+    res_test_age = res_test_age,
+    res_interaction = res_interaction,
+    coef_names = rn
+  ))
+}
+
+
+```
+
+Helper Function that gets all significant genes with padj < 0.05
+```{r}
+get_sig_genes <- function(res, alpha = 0.05) {
+  res <- res[order(res$padj), ]
+  sig <- subset(res, !is.na(padj) & padj < alpha)
+
+  list(
+    all  = sig,
+    up   = sig[sig$log2FoldChange > 0, ],
+    down = sig[sig$log2FoldChange < 0, ]
+  )
+}
+
+```
+
+
+Now using this function DESeq function
+```{r}
+table(dds_filt$Group, dds_filt$Age)
+
+out_WSPDsa <- run_age_comparison(dds_filt,control_group = "FAPDsa", test_group = "WSSCsa")
+```
+
+```{r}
+sig_test_age <- get_sig_genes(out_WSPDsa$res_test_age)
+sig_interact <- get_sig_genes(out_WSPDsa$res_interaction)
+
+```
+
+
+
+Exporting Top Control Genes to Excel
+```{r}
+wb <- createWorkbook()
+
+sig_out  <- cbind(Gene = rownames(sig), sig)
+up_out   <- cbind(Gene = rownames(up), up)
+down_out <- cbind(Gene = rownames(down), down)
+
+addWorksheet(wb, "All_significant")
+addWorksheet(wb, "Upregulated_28d")
+addWorksheet(wb, "Downregulated_28d")
+
+writeData(wb, "All_significant", sig_out, rowNames = TRUE)
+writeData(wb, "Upregulated_28d", up_out, rowNames = TRUE)
+writeData(wb, "Downregulated_28d", down_out, rowNames = TRUE)
+
+saveWorkbook(wb, "SignificantAgeControlGenes.xlsx", overwrite = TRUE)
+
+```
+
+
+
+Heat map of the most significant genes
+```{r}
+vsd_ctrl <- vst(dds_ctrl, blind = FALSE)
+plotPCA(vsd_ctrl, intgroup = "Age")
+
+topgenes <- head(rownames(res_ctrl_time), 15)
+mat_ctrl <- assay(vsd_ctrl)[topgenes, ]
+pheatmap::pheatmap(mat_ctrl, scale = "row",
+                   annotation_col = as.data.frame(colData(vsd_ctrl)[, "Age", drop=FALSE]))
+
+```
+
+Gigantic Helper Function Test that finds all significant genes from the DESeq Object created, and then runs KEGG and GO enrichment, putting all into a dataframe before returning that dataframe.
+```{r}
+run_enrichment_pipeline <- function(deseq_list, 
+                                    alpha = 0.05,
+                                    orgdb = org.Mm.eg.db,
+                                    organism = "mmu",
+                                    fromType = "ENSEMBL",
+                                    keyType = "ENTREZID",
+                                    go_ont = "BP",
+                                    pval_cutoff = 0.05,
+                                    qval_cutoff = 0.05,
+                                    strip_version = TRUE) {
+  
+  # ----------------------------
+  # Helper to extract significant genes
+  # ----------------------------
+  get_sig_genes <- function(res, alpha = 0.05) {
+    res <- res[order(res$padj), ]
+    sig <- subset(res, !is.na(padj) & padj < alpha)
+    list(
+      all  = sig,
+      up   = sig[sig$log2FoldChange > 0, ],
+      down = sig[sig$log2FoldChange < 0, ]
+    )
+  }
+  
+  # ----------------------------
+  # Helper to run GO/KEGG enrichment
+  # ----------------------------
+  run_GO_KEGG <- function(up_genes, down_genes) {
+    # strip version numbers if needed
+    genes_up   <- if(strip_version) sub("\\..*", "", rownames(up_genes)) else rownames(up_genes)
+    genes_down <- if(strip_version) sub("\\..*", "", rownames(down_genes)) else rownames(down_genes)
+    
+    # Convert IDs
+    up_ids <- bitr(genes_up, fromType = fromType, toType = keyType, OrgDb = orgdb)
+    down_ids <- bitr(genes_down, fromType = fromType, toType = keyType, OrgDb = orgdb)
+    
+    # GO
+    ego_up <- enrichGO(gene = up_ids$ENTREZID,
+                       OrgDb = orgdb,
+                       keyType = keyType,
+                       ont = go_ont,
+                       pAdjustMethod = "BH",
+                       pvalueCutoff = pval_cutoff,
+                       qvalueCutoff = qval_cutoff)
+    
+    ego_down <- enrichGO(gene = down_ids$ENTREZID,
+                         OrgDb = orgdb,
+                         keyType = keyType,
+                         ont = go_ont,
+                         pAdjustMethod = "BH",
+                         pvalueCutoff = pval_cutoff,
+                         qvalueCutoff = qval_cutoff)
+    
+    # KEGG
+    ekegg_up <- enrichKEGG(gene = up_ids$ENTREZID,
+                           organism = organism,
+                           pvalueCutoff = pval_cutoff)
+    
+    ekegg_down <- enrichKEGG(gene = down_ids$ENTREZID,
+                             organism = organism,
+                             pvalueCutoff = pval_cutoff)
+    
+    list(GO_up = ego_up, GO_down = ego_down, KEGG_up = ekegg_up, KEGG_down = ekegg_down)
+  }
+  
+  # ----------------------------
+  # 1. Extract sig genes for test_age and interaction
+  # ----------------------------
+  sig_test_age <- get_sig_genes(deseq_list$res_test_age, alpha)
+  sig_interaction <- get_sig_genes(deseq_list$res_interaction, alpha)
+  
+  # ----------------------------
+  # 2. Run enrichment
+  # ----------------------------
+  enrich_test_age <- run_GO_KEGG(sig_test_age$up, sig_test_age$down)
+  enrich_interaction <- run_GO_KEGG(sig_interaction$up, sig_interaction$down)
+  
+  # ----------------------------
+  # 3. Build summary dataframe of all significant genes
+  # ----------------------------
+  # Helper to make df
+  make_df <- function(sig_list, label) {
+    df_up <- data.frame(
+      Gene = rownames(sig_list$up),
+      log2FC = sig_list$up$log2FoldChange,
+      padj = sig_list$up$padj,
+      direction = "up",
+      contrast = label
+    )
+    df_down <- data.frame(
+      Gene = rownames(sig_list$down),
+      log2FC = sig_list$down$log2FoldChange,
+      padj = sig_list$down$padj,
+      direction = "down",
+      contrast = label
+    )
+    rbind(df_up, df_down)
+  }
+  
+  df_test_age <- make_df(sig_test_age, "TestAge")
+  df_interaction <- make_df(sig_interaction, "Interaction")
+  
+  all_sig_genes_df <- rbind(df_test_age, df_interaction)
+  
+  # ----------------------------
+  # 4. Return everything
+  # ----------------------------
+  list(
+    sig_test_age = sig_test_age,
+    sig_interaction = sig_interaction,
+    enrich_test_age = enrich_test_age,
+    enrich_interaction = enrich_interaction,
+    all_sig_genes_df = all_sig_genes_df
+  )
+}
+
+```
+
+
+Testing the significant gene along with KEGG and GO enrichment function.
+```{r}
+pipeline_results <- run_enrichment_pipeline(out_WSPDsa)
+
+
+```
+
+  
+
+New Helper Function for getting all the plots of KEGG and GO enrichment
+```{r}
+plot_enrichment_dot_barplots <- function(pipeline_results,
+                                         control_group = "FAPDsa",
+                                         test_group    = "WSSCsa",
+                                         showCategoryGO = 10,
+                                         showCategoryKEGG = 10) {
+  
+  plots <- list()
+  
+  # ----------------------------
+  # Helper function to generate both dotplot and barplot
+  # ----------------------------
+  make_plots <- function(enrich_obj, title_prefix, showCategory) {
+    out <- list()
+    out[[paste0(title_prefix, "_dot")]] <- dotplot(enrich_obj, showCategory = showCategory) +
+      ggtitle(paste0(title_prefix, " - Dotplot"))
+    out[[paste0(title_prefix, "_bar")]] <- barplot(enrich_obj, showCategory = showCategory) +
+      ggtitle(paste0(title_prefix, " - Barplot"))
+    return(out)
+  }
+  
+  # ----------------------------
+  # 1. Test group aging
+  # ----------------------------
+  if(!is.null(pipeline_results$enrich_test_age$GO_up)) {
+    plots <- c(plots, make_plots(pipeline_results$enrich_test_age$GO_up, 
+                                 paste0(test_group, " Aging - GO Up"), showCategoryGO))
+  }
+  if(!is.null(pipeline_results$enrich_test_age$GO_down)) {
+    plots <- c(plots, make_plots(pipeline_results$enrich_test_age$GO_down, 
+                                 paste0(test_group, " Aging - GO Down"), showCategoryGO))
+  }
+  if(!is.null(pipeline_results$enrich_test_age$KEGG_up)) {
+    plots <- c(plots, make_plots(pipeline_results$enrich_test_age$KEGG_up, 
+                                 paste0(test_group, " Aging - KEGG Up"), showCategoryKEGG))
+  }
+  if(!is.null(pipeline_results$enrich_test_age$KEGG_down)) {
+    plots <- c(plots, make_plots(pipeline_results$enrich_test_age$KEGG_down, 
+                                 paste0(test_group, " Aging - KEGG Down"), showCategoryKEGG))
+  }
+  
+  # ----------------------------
+  # 2. Interaction (aging difference vs control)
+  # ----------------------------
+  if(!is.null(pipeline_results$enrich_interaction$GO_up)) {
+    plots <- c(plots, make_plots(pipeline_results$enrich_interaction$GO_up, 
+                                 paste0(test_group, " vs ", control_group, " - GO Up"), showCategoryGO))
+  }
+  if(!is.null(pipeline_results$enrich_interaction$GO_down)) {
+    plots <- c(plots, make_plots(pipeline_results$enrich_interaction$GO_down, 
+                                 paste0(test_group, " vs ", control_group, " - GO Down"), showCategoryGO))
+  }
+  if(!is.null(pipeline_results$enrich_interaction$KEGG_up)) {
+    plots <- c(plots, make_plots(pipeline_results$enrich_interaction$KEGG_up, 
+                                 paste0(test_group, " vs ", control_group, " - KEGG Up"), showCategoryKEGG))
+  }
+  if(!is.null(pipeline_results$enrich_interaction$KEGG_down)) {
+    plots <- c(plots, make_plots(pipeline_results$enrich_interaction$KEGG_down, 
+                                 paste0(test_group, " vs ", control_group, " - KEGG Down"), showCategoryKEGG))
+  }
+  
+  return(plots)
+}
+
+```
+
+Run Controls Graphs so we can compare
+```{r}
+
+# Example: control_group = "FAPDsa"
+dds_ctrl <- dds_filt[, dds_filt$Group == "FAPDsa"]
+
+# Update design for aging only
+design(dds_ctrl) <- ~ Age
+
+# Run DESeq
+dds_ctrl <- DESeq(dds_ctrl)
+
+# ===============================
+# 2. Extract differential expression for aging in control
+# ===============================
+res_ctrl_age <- results(dds_ctrl, contrast = c("Age", "28 day", "1 day"))
+res_ctrl_age <- res_ctrl_age[order(res_ctrl_age$padj), ]
+
+# Subset significant genes
+sig_ctrl <- subset(res_ctrl_age, padj < 0.05)
+up_ctrl   <- sig_ctrl[sig_ctrl$log2FoldChange > 0, ]
+down_ctrl <- sig_ctrl[sig_ctrl$log2FoldChange < 0, ]
+
+# ===============================
+# 3. Run GO/KEGG enrichment for control aging
+# ===============================
+# Reusing the helper function
+ctrl_enrich <- run_GO_KEGG(up_ctrl, down_ctrl)
+
+# ===============================
+# 4. Plot dotplots for GO/KEGG
+# ===============================
+ctrl_plots <- list()
+
+if(!is.null(ctrl_enrich$GO_up)) {
+  ctrl_plots$GO_Up_Dot <- dotplot(ctrl_enrich$GO_up, showCategory = 10) +
+    ggtitle("Control Aging - GO Up")
+}
+if(!is.null(ctrl_enrich$GO_down)) {
+  ctrl_plots$GO_Down_Dot <- dotplot(ctrl_enrich$GO_down, showCategory = 10) +
+    ggtitle("Control Aging - GO Down")
+}
+if(!is.null(ctrl_enrich$KEGG_up)) {
+  ctrl_plots$KEGG_Up_Dot <- dotplot(ctrl_enrich$KEGG_up, showCategory = 10) +
+    ggtitle("Control Aging - KEGG Up")
+}
+if(!is.null(ctrl_enrich$KEGG_down)) {
+  ctrl_plots$KEGG_Down_Dot <- dotplot(ctrl_enrich$KEGG_down, showCategory = 10) +
+    ggtitle("Control Aging - KEGG Down")
+}
+
+if(!is.null(ctrl_enrich$GO_up)) {
+  ctrl_plots$GO_Up_Bar <- barplot(ctrl_enrich$GO_up, showCategory = 10) +
+    ggtitle("Control Aging - GO Up")
+}
+if(!is.null(ctrl_enrich$GO_down)) {
+  ctrl_plots$GO_Down_Bar <- barplot(ctrl_enrich$GO_down, showCategory = 10) +
+    ggtitle("Control Aging - GO Down")
+}
+if(!is.null(ctrl_enrich$KEGG_up)) {
+  ctrl_plots$KEGG_Up_Bar <- barplot(ctrl_enrich$KEGG_up, showCategory = 10) +
+    ggtitle("Control Aging - KEGG Up")
+}
+if(!is.null(ctrl_enrich$KEGG_down)) {
+  ctrl_plots$KEGG_Down_Bar <- barplot(ctrl_enrich$KEGG_down, showCategory = 10) +
+    ggtitle("Control Aging - KEGG Down")
+}
+
+```
+Control Plots
+```{r}
+
+ctrl_plots$GO_Up_Dot  # example
+ctrl_plots$GO_Down_Dot
+ctrl_plots$KEGG_Up_Bar
+ctrl_plots$KEGG_Down_Bar
+```
+
+
+
+Now workflow for Gene Comparisons
+```{r}
+#Defining what Groups we are comparing
+out <- run_age_comparison(dds_filt, control_group = "FAPDsa", test_group = "WSSCsa")
+
+#Extract Sig Genes and Run KEGG and GO Enrichment
+pipeline_results <- run_enrichment_pipeline_with_universe(out)
+
+# Plotting
+plots <- plot_enrichment_dotplots(
+  pipeline_results,
+  control_group = "FAPDsa",
+  test_group    = "WSSCsa",
+  showCategoryGO = 10,
+  showCategoryKEGG = 10
+)
+
+```
+
+```{r}
+plots$TestAge_KEGG_Up
+plots$Interaction_GO_Up
+plots$Interaction_KEGG_Up
+plots$Interaction_KEGG_Down
+```
+
+Alright so we want to compare FA vs WS, SA vs RS, and then finally culuminate the 2 into FA SA vs WS RS
+```{r}
+out <- run_age_comparison(dds_filt, control_group = "FAPDsa", test_group = "FAPDrs")
+
+#Extract Sig Genes and Run KEGG and GO Enrichment
+pipeline_results <- run_enrichment_pipeline_with_universe(out)
+
+# Plotting
+plots <- plot_enrichment_dotplots(
+  pipeline_results,
+  control_group = "FAPDsa",
+  test_group    = "FAPDrs",
+  showCategoryGO = 10,
+  showCategoryKEGG = 10
+)
+
+```
+Plots for FA Resolvin and Differences in Aging
+```{r}
+plots$TestAge_GO_Up
+plots$TestAge_GO_Down
+plots$TestAge_KEGG_Up
+plots$TestAge_KEGG_Down
+```
+
+Plots for FA Saline vs FA Resolvin and then signficant genes
+```{r}
+plots$Interaction_GO_Up
+plots$Interaction_GO_Down
+plots$Interaction_KEGG_Up
+plots$Interaction_KEGG_Down
+```
+FA Saline vs WS resolvin
+```{r}
+out <- run_age_comparison(dds_filt, control_group = "FAPDsa", test_group = "WSPDrs")
+
+#Extract Sig Genes and Run KEGG and GO Enrichment
+pipeline_results <- run_enrichment_pipeline_with_universe(out)
+
+# Plotting
+plots <- plot_enrichment_dotplots(
+  pipeline_results,
+  control_group = "FAPDsa",
+  test_group    = "WSPDrs",
+  showCategoryGO = 10,
+  showCategoryKEGG = 10
+)
+
+```
+WS Resolvin Plots
+```{r}
+plots$TestAge_GO_Up
+plots$TestAge_GO_Down
+plots$TestAge_KEGG_Up
+plots$TestAge_KEGG_Down
+```
+
+FA Saline vs WS Resolvin Plots
+```{r}
+plots$Interaction_GO_Up
+plots$Interaction_GO_Down
+plots$Interaction_KEGG_Up
+plots$Interaction_KEGG_Down
+```
+
+Testing Enrichment pipeline with Universe of Genes
+```{r}
+run_enrichment_pipeline_with_universe <- function(deseq_list, 
+                                                  alpha = 0.05,
+                                                  orgdb = org.Mm.eg.db,
+                                                  organism = "mmu",
+                                                  fromType = "ENSEMBL",
+                                                  keyType = "ENTREZID",
+                                                  go_ont = "BP",
+                                                  pval_cutoff = 0.05,
+                                                  qval_cutoff = 0.05,
+                                                  strip_version = TRUE,
+                                                  define_universe = TRUE) {
+  
+  # ----------------------------
+  # Helper to extract significant genes
+  # ----------------------------
+  get_sig_genes <- function(res, alpha = 0.05) {
+    res <- res[order(res$padj), ]
+    sig <- subset(res, !is.na(padj) & padj < alpha)
+    list(
+      all  = sig,
+      up   = sig[sig$log2FoldChange > 0, ],
+      down = sig[sig$log2FoldChange < 0, ]
+    )
+  }
+  
+  # ----------------------------
+  # Helper to run GO/KEGG enrichment
+  # ----------------------------
+  run_GO_KEGG <- function(up_genes, down_genes, universe_ids = NULL) {
+    genes_up   <- if(strip_version) sub("\\..*", "", rownames(up_genes)) else rownames(up_genes)
+    genes_down <- if(strip_version) sub("\\..*", "", rownames(down_genes)) else rownames(down_genes)
+    
+    up_ids <- bitr(genes_up, fromType = fromType, toType = keyType, OrgDb = orgdb)
+    down_ids <- bitr(genes_down, fromType = fromType, toType = keyType, OrgDb = orgdb)
+    
+    ego_up <- enrichGO(gene = up_ids$ENTREZID,
+                       OrgDb = orgdb,
+                       keyType = keyType,
+                       ont = go_ont,
+                       universe = universe_ids,
+                       pAdjustMethod = "BH",
+                       pvalueCutoff = pval_cutoff,
+                       qvalueCutoff = qval_cutoff)
+    
+    ego_down <- enrichGO(gene = down_ids$ENTREZID,
+                         OrgDb = orgdb,
+                         keyType = keyType,
+                         ont = go_ont,
+                         universe = universe_ids,
+                         pAdjustMethod = "BH",
+                         pvalueCutoff = pval_cutoff,
+                         qvalueCutoff = qval_cutoff)
+    
+    ekegg_up <- enrichKEGG(gene = up_ids$ENTREZID,
+                           organism = organism,
+                           universe = universe_ids,
+                           pvalueCutoff = pval_cutoff)
+    
+    ekegg_down <- enrichKEGG(gene = down_ids$ENTREZID,
+                             organism = organism,
+                             universe = universe_ids,
+                             pvalueCutoff = pval_cutoff)
+    
+    list(GO_up = ego_up, GO_down = ego_down, KEGG_up = ekegg_up, KEGG_down = ekegg_down)
+  }
+  
+  # ----------------------------
+  # 0. Define universe if requested
+  # ----------------------------
+  if (define_universe) {
+    all_genes <- rownames(deseq_list$res_test_age)
+    if (strip_version) {
+      all_genes <- sub("\\..*", "", all_genes)
+    }
+    universe_ids <- bitr(all_genes, fromType = fromType, toType = keyType, OrgDb = orgdb)$ENTREZID
+  } else {
+    universe_ids <- NULL
+  }
+  
+  # ----------------------------
+  # 1. Extract sig genes
+  # ----------------------------
+  sig_test_age <- get_sig_genes(deseq_list$res_test_age, alpha)
+  sig_interaction <- get_sig_genes(deseq_list$res_interaction, alpha)
+  
+  # ----------------------------
+  # 2. Run enrichment using universe
+  # ----------------------------
+  enrich_test_age <- run_GO_KEGG(sig_test_age$up, sig_test_age$down, universe_ids)
+  enrich_interaction <- run_GO_KEGG(sig_interaction$up, sig_interaction$down, universe_ids)
+  
+  # ----------------------------
+  # 3. Build summary dataframe
+  # ----------------------------
+  make_df <- function(sig_list, label) {
+    df_up <- data.frame(
+      Gene = rownames(sig_list$up),
+      log2FC = sig_list$up$log2FoldChange,
+      padj = sig_list$up$padj,
+      direction = "up",
+      contrast = label
+    )
+    df_down <- data.frame(
+      Gene = rownames(sig_list$down),
+      log2FC = sig_list$down$log2FoldChange,
+      padj = sig_list$down$padj,
+      direction = "down",
+      contrast = label
+    )
+    rbind(df_up, df_down)
+  }
+  
+  df_test_age <- make_df(sig_test_age, "TestAge")
+  df_interaction <- make_df(sig_interaction, "Interaction")
+  all_sig_genes_df <- rbind(df_test_age, df_interaction)
+  
+  # ----------------------------
+  # 4. Return everything
+  # ----------------------------
+  list(
+    sig_test_age = sig_test_age,
+    sig_interaction = sig_interaction,
+    enrich_test_age = enrich_test_age,
+    enrich_interaction = enrich_interaction,
+    all_sig_genes_df = all_sig_genes_df,
+    gene_universe = universe_ids
+  )
+}
+
+```
+
+
+
+
+
+
