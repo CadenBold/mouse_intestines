@@ -15,28 +15,66 @@ library(clusterProfiler)
 library(org.Mm.eg.db)   # change to org.Hs.eg.db if human
 library(enrichplot)
 library(DOSE)
+library(readxl)
+library(AnnotationDbi)
+library(stringr)
 ```
+
+
+```{r}
+FastP_featurecounts <- read.csv("FastP_featurecounts.csv")
+metadata <- read.csv("metadata.csv")
+```
+
+# Cleaned up Data Matrix
+```{r}
+head(FastP_featurecounts)
+
+fc <- FastP_featurecounts[,-(2:6)]
+colnames(fc) <- as.character(unlist(fc[1,]))
+fc <- fc[-1,]
+rownames(fc) <- as.character(unlist(fc[,1]))
+fc <- fc[,-1]
+head(fc)
+
+count_matrix <- as.matrix(fc)
+head(count_matrix)
+storage.mode(count_matrix) <- "numeric"
+print(is.numeric(count_matrix))
+```
+
+Adding Column for Ensembl IDs to Gene IDs
+```{r}
+ids <- data.frame(ensembl_ids = rownames(fc), stringsAsFactors = FALSE)
+
+# 2. Clean Ensembl IDs (remove .version)
+ids$clean_ensembl <- str_remove(ids$ensembl_ids, "\\.\\d+$")
+
+# 3. Query annotations
+annotations <- select(org.Mm.eg.db,
+                      keys = unique(ids$clean_ensembl),
+                      columns = c("SYMBOL", "GENENAME", "ENTREZID"),
+                      keytype = "ENSEMBL")
+
+# 4. Enforce one-to-one mapping
+annot_unique <- annotations[!duplicated(annotations$ENSEMBL), ]
+rownames(annot_unique) <- annot_unique$ENSEMBL
+
+# 5. Build master table by matching CLEAN IDs
+ids$SYMBOL   <- annot_unique[ids$clean_ensembl, "SYMBOL"]
+ids$GENENAME <- annot_unique[ids$clean_ensembl, "GENENAME"]
+ids$ENTREZID <- annot_unique[ids$clean_ensembl, "ENTREZID"]
+
+# 6. Inspect
+head(ids)
+```
+
 
 # Check Files are Loaded in and begin cleaning of them
 ```{r}
 # Check head of read in files, and then ccreate copies ot modify
 head(metadata)
-head(FastP_featurecounts)
 meta <- metadata
-fc <- FastP_featurecounts[-1,]
-
-head(fc)
-
-# Cleaning for a matrix of only numbers
-count_matrix <- fc[,-(2:6)]
-colnames(count_matrix) <- count_matrix[1,]
-count_matrix <- count_matrix[-1,]
-
-
-count_matrix <- count_matrix %>%
-  column_to_rownames("Geneid")
-# Check count_matrix is correct
-head(count_matrix)
 
 # Correct unique grouping so that we can quickly split on it
 meta <- meta %>%
@@ -47,13 +85,6 @@ meta <- meta %>%
 meta %>%
   distinct(Age, Exposure, Diet, Treatment, GroupID) %>%
   arrange(GroupID)
-
-count_matrix <- as.matrix(count_matrix)
-storage.mode(count_matrix) <- "numeric"
-
-mode(count_matrix)
-is.numeric(count_matrix)
-anyNA(count_matrix)
 
 ```
 Now we want to compute basic DESeq2 Object and Limma Object, with transforms of scale and quantile.
@@ -66,10 +97,9 @@ dds <- DESeqDataSetFromMatrix(
 )
 
 #Potential Filtering Option
-dds_filt <- dds[rowSums(counts(dds)) >= 10, ]
+dds <- dds[rowSums(counts(dds)) >= 10, ]
 
 dds <- DESeq(dds)
-dds_filt <- DESeq(dds_filt)
 
 res <- results(dds)
 
@@ -78,17 +108,12 @@ head(res)
 
 vsd <- vst(dds, blind=FALSE)
 vst <- assay(vsd)
-
-vsd_filt <- vst(dds_filt, blind=FALSE)
-vst_filt <- assay(vsd_filt)
 ```
 Exporting VST to CSV
 ```{r}
 vst_df <- as.data.frame(vst)
 head(vst_df)
 
-vst_filt_df <- as.data.frame(vst_filt)
-head(vst_filt_df)
 #write.csv(vsd, "DESeq_VST.csv",row.names = TRUE)
 #write.csv(vst_filt, "DESeq_Filtered_VST.csv", row.names = TRUE)
 ```
@@ -111,6 +136,8 @@ rownames(meta) <- meta$SampleID
 meta$SampleID <- NULL
 
 meta
+
+
 
 ```
 We want to do Density Plots for the Raw Counts, DESeq2 VST Counts, and the QN_Log_Counts
@@ -198,7 +225,7 @@ plot_density_with_colored_outliers(
 Computing PCA for DESeq Filtered
 ```{r}
 
-pca_input <- t(vst_filt)
+pca_input <- t(vst)
 
 any(apply(pca_input, 2, var) == 0)
 
@@ -260,10 +287,10 @@ keep<- !(
 )
 
 meta_sub <- meta[keep, ]
-vst_filt_sub <- vst_filt[, rownames(meta_sub)]
+vst_sub <- vst[, rownames(meta_sub)]
 
-pca_input <- t(vst_filt_sub)
-
+pca_input <- t(vst_sub)
+any(apply(pca_input, 2, var) == 0)
 pca <- prcomp(pca_input, center = TRUE, scale. = TRUE)
 
 pca_df <- data.frame(
@@ -314,7 +341,7 @@ keep<- !(
 )
 
 meta_sub <- meta[keep, ]
-vst_filt_sub <- vst_filt[, rownames(meta_sub)]
+vst_sub <- vst_filt[, rownames(meta_sub)]
 
 pca_input <- t(vst_filt_sub)
 
@@ -661,7 +688,7 @@ ggplot(top_pc2,
 
 This is the point where we will now start comparing between ages and then the differences from these and groups. We will start with just using DESeq
 ```{r}
-dds_ctrl <- dds_filt[, dds_filt$Group == "FAPDsa"]
+dds_ctrl <- dds[, dds$Group == "FAPDsa"]
 
 design(dds_ctrl) <- ~ Age
 dds_ctrl <- DESeq(dds_ctrl)
@@ -751,7 +778,7 @@ Now using this function DESeq function
 ```{r}
 table(dds_filt$Group, dds_filt$Age)
 
-out_WSPDsa <- run_age_comparison(dds_filt,control_group = "FAPDsa", test_group = "WSSCsa")
+out_WSPDsa <- run_age_comparison(dds,control_group = "FAPDsa", test_group = "WSSCsa")
 ```
 
 ```{r}
@@ -1076,7 +1103,7 @@ ctrl_plots$KEGG_Down_Bar
 Now workflow for Gene Comparisons
 ```{r}
 #Defining what Groups we are comparing
-out <- run_age_comparison(dds_filt, control_group = "FAPDsa", test_group = "WSSCsa")
+out <- run_age_comparison(dds, control_group = "FAPDsa", test_group = "WSSCsa")
 
 #Extract Sig Genes and Run KEGG and GO Enrichment
 pipeline_results <- run_enrichment_pipeline_with_universe(out)
@@ -1101,7 +1128,7 @@ plots$Interaction_KEGG_Down
 
 Alright so we want to compare FA vs WS, SA vs RS, and then finally culuminate the 2 into FA SA vs WS RS
 ```{r}
-out <- run_age_comparison(dds_filt, control_group = "FAPDsa", test_group = "FAPDrs")
+out <- run_age_comparison(dds, control_group = "FAPDsa", test_group = "FAPDrs")
 
 #Extract Sig Genes and Run KEGG and GO Enrichment
 pipeline_results <- run_enrichment_pipeline_with_universe(out)
@@ -1139,7 +1166,7 @@ out <- run_age_comparison(dds_filt, control_group = "FAPDsa", test_group = "WSPD
 pipeline_results <- run_enrichment_pipeline_with_universe(out)
 
 # Plotting
-plots <- plot_enrichment_dotplots(
+plots <- plot_enrichment_dot_barplots(
   pipeline_results,
   control_group = "FAPDsa",
   test_group    = "WSPDrs",
@@ -1296,6 +1323,338 @@ run_enrichment_pipeline_with_universe <- function(deseq_list,
 }
 
 ```
+
+Redoing PCAs and keeping Consistent Layouts
+```{r}
+
+pca_input <- t(vst_filt)
+
+any(apply(pca_input, 2, var) == 0)
+
+
+pca <- prcomp(pca_input, center = TRUE, scale. = TRUE)
+
+pca_df <- data.frame(
+  Sample = rownames(pca$x),
+  PC1 = pca$x[, 1],
+  PC2 = pca$x[, 2],
+  metadata[rownames(pca$x), ]
+)
+
+pve <- pca$sdev^2 / sum(pca$sdev^2)
+pve[1:5]
+
+
+plot(
+  pca_df$PC1, pca_df$PC2,
+  xlab = paste0("PC1 (", round(pve[1] * 100, 1), "%)"),
+  ylab = paste0("PC2 (", round(pve[2] * 100, 1), "%)"),
+  pch = 19
+)
+
+pca_df$Outlier <- with(
+  pca_df,
+  abs(scale(PC1)) > 2 | abs(scale(PC2)) > 2
+)
+
+print(pca_df$Outlier)
+
+pca_df$GroupFactor <- meta[rownames(pca_df), "Group"]
+#pca_df$GroupFactor <- factor(pca_df$GroupID)
+
+
+ggplot(pca_df, aes(x = PC1, y = PC2, color = GroupFactor)) +
+   geom_point(aes(fill = GroupFactor),
+             shape = 21,
+             color = "black",
+             stroke = 0.8,
+             size = 6) +
+    geom_text(
+    data = subset(pca_df, Outlier),
+    aes(label =  sub(".*-", "", Sample)),
+    size = 4,
+    color="black"
+  ) +
+  labs(
+    x = paste0("PC1 (", round(pve[1] * 100, 1), "%)"),
+    y = paste0("PC2 (", round(pve[2] * 100, 1), "%)"),
+    color = "Group",
+    title="PCA of 8 Groups",
+    subtitle="DESeq Filtered Beforehand"
+  ) +
+  theme_classic()
+
+
+```
+
+
+
+Doing some experiments and looking at top genes considering every factor now
+```{r}
+coefs <- resultsNames(dds)
+coefs <- coefs[coefs != "Intercept"]
+
+head(coefs)
+
+res_list <- lapply(coefs, function(cn) {
+  res <- results(dds, name = cn)
+  res <- as.data.frame(res)
+  res$ENSEMBL <- rownames(res)
+  
+  sig <- res[!is.na(res$padj) & res$padj < 0.05, ]
+  return(sig)
+})
+
+names(res_list) <- coefs
+
+all_sig <- unique(unlist(lapply(res_list, rownames)))
+
+
+```
+
+```{r}
+res <- results(dds, name="Exposure_WS_vs_FA")
+res <- as.data.frame(res)
+res$ENSEMBL <- rownames(res)
+head(res)
+
+sig <- res[!is.na(res$padj) & res$padj <0.05, ]
+
+# Add direction column: Up / Down
+sig$direction <- ifelse(sig$log2FoldChange > 0, "Up", "Down")
+table(sig$direction)
+
+sig$ENTREZID <- ids$ENTREZID[match(str_remove(sig$ENSEMBL, "\\.\\d+$"), ids$clean_ensembl)]
+sig_entrez <- unique(sig$ENTREZID)
+sig_entrez <- sig_entrez[!is.na(sig_entrez)]
+
+sig_up_entrez   <- sig$ENTREZID[sig$direction == "Up"]
+sig_up_entrez   <- unique(sig_up_entrez[!is.na(sig_up_entrez)])
+
+sig_down_entrez <- sig$ENTREZID[sig$direction == "Down"]
+sig_down_entrez <- unique(sig_down_entrez[!is.na(sig_down_entrez)])
+
+```
+
+```{r}
+
+  # remove NAs
+
+# Universe / background: all tested genes with Entrez IDs
+bg_entrez <- unique(ids$ENTREZID)
+bg_entrez <- bg_entrez[!is.na(bg_entrez)]
+
+ego_up <- enrichGO(
+  gene          = sig_up_entrez,
+  universe      = bg_entrez,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "ENTREZID",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05,
+  readable      = TRUE
+)
+
+ego_down <- enrichGO(
+  gene          = sig_down_entrez,
+  universe      = bg_entrez,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "ENTREZID",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05,
+  readable      = TRUE
+)
+
+
+ego_up_df   <- as.data.frame(ego_up) %>% mutate(direction = "Up")
+ego_down_df <- as.data.frame(ego_down) %>% mutate(direction = "Down")
+
+ego_combined <- bind_rows(ego_up_df, ego_down_df)
+
+```
+
+```{r}
+dotplot(ego_up, showCategory=10,title="GO Up")
+dotplot(ego_down, showCategory=10, title="GO Down")
+```
+
+Want to do GO enrichment and find top 20 genes of true control 1d vs WSPDsa 1d
+```{r}
+meta_test <- meta[
+  meta$Age == "1 day" &
+  meta$Treatment == "sa" &
+  meta$Diet == "PD" &
+  meta$Exposure %in% c("FA", "WS"),
+]
+
+table(meta_test$Exposure, meta_test$Age)
+meta_test
+
+count_test <- count_matrix[,rownames(meta_test)]
+
+dds <- DESeqDataSetFromMatrix(
+  countData = count_test,
+  colData   = meta_test,
+  design    = ~ Group
+)
+
+#Potential Filtering Option
+dds <- dds[rowSums(counts(dds)) >= 10, ]
+dds <- DESeq(dds)
+
+resultsNames(dds)
+
+res <- results(dds)
+head(res)
+```
+
+```{r}
+res <- results(dds, name = "Group_WSPDsa_vs_FAPDsa")
+res <- as.data.frame(res)
+res$ENSEMBL <- rownames(res)
+
+# keep only significant genes
+sig <- res[!is.na(res$padj) & res$padj < 0.05, ]
+
+# add absolute log2 fold change
+sig$absLog2FC <- abs(sig$log2FoldChange)
+
+# sort by absolute effect size
+sig_sorted <- sig[order(-sig$absLog2FC), ]
+sig_sorted$clean_ensembl <- str_remove(sig_sorted$ENSEMBL, "\\.\\d+$")
+sig_sorted$SYMBOL <- ids$SYMBOL[match(sig_sorted$clean_ensembl, ids$clean_ensembl)]
+
+# Only get mapped symbols
+sig_mapped <- sig_sorted[!is.na(sig_sorted$SYMBOL) & sig_sorted$SYMBOL != "", ]
+
+# look at top hits
+head(sig_sorted, 10)
+
+```
+
+```{r}
+# take top 20 by absolute log2FC
+top20 <- head(sig_mapped, 20)
+
+# clean Ensembl again just in case
+top20$clean_ensembl <- str_remove(top20$ENSEMBL, "\\.\\d+$")
+
+# map gene symbols
+top20$SYMBOL <- ids$SYMBOL[match(top20$clean_ensembl, ids$clean_ensembl)]
+
+# if some symbols are missing, fall back to Ensembl
+top20$LABEL <- ifelse(is.na(top20$SYMBOL), top20$clean_ensembl, top20$SYMBOL)
+
+# classify direction
+top20$Direction <- ifelse(top20$log2FoldChange > 0, "Upregulated in WSPDsa", "Downregulated in WSPDsa")
+
+
+ggplot(top20, aes(x = reorder(LABEL, absLog2FC),
+                  y = absLog2FC,
+                  fill = Direction)) +
+  geom_col() +
+  coord_flip() +
+  scale_y_continuous(breaks = scales::pretty_breaks(n = 6))+
+  labs(
+    x = "Gene Name",
+    y = "| log2(FoldChange) |",
+    title = "Top 20 Log Fold Genes (Mapped Gene Symbols Only)",
+    subtitle = "WSPDsa 1 Day vs True Control (FAPDsa 1 Day)"
+  ) +
+  theme_classic(base_size = 13)
+
+```
+
+```{r}
+sig$clean_ensembl <- str_remove(sig$ENSEMBL, "\\.\\d+$")
+sig$ENTREZID <- ids$ENTREZID[match(sig$clean_ensembl, ids$clean_ensembl)]
+
+# remove genes without Entrez IDs
+sig <- sig[!is.na(sig$ENTREZID), ]
+
+sig_up   <- sig[sig$log2FoldChange > 0, ]
+sig_down <- sig[sig$log2FoldChange < 0, ]
+
+up_entrez   <- unique(sig_up$ENTREZID)
+down_entrez <- unique(sig_down$ENTREZID)
+
+# background universe
+bg_entrez <- unique(ids$ENTREZID)
+bg_entrez <- bg_entrez[!is.na(bg_entrez)]
+
+go_up <- enrichGO(
+  gene          = up_entrez,
+  universe      = bg_entrez,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "ENTREZID",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05,
+  readable      = TRUE
+)
+
+go_down <- enrichGO(
+  gene          = down_entrez,
+  universe      = bg_entrez,
+  OrgDb         = org.Mm.eg.db,
+  keyType       = "ENTREZID",
+  ont           = "BP",
+  pAdjustMethod = "BH",
+  pvalueCutoff  = 0.05,
+  qvalueCutoff  = 0.05,
+  readable      = TRUE
+)
+```
+
+```{r}
+go_up_df <- as.data.frame(go_up)
+
+# sort by Count descending
+go_up_df <- go_up_df[order(-go_up_df$Count), ]
+
+# pick top N categories
+topN <- 15
+go_up_top <- go_up_df[1:topN, ]
+
+
+ggplot(go_up_top, aes(x = reorder(Description, Count), y = Count)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(
+    x = "GO Term",
+    y = "Gene Count",
+    title = "Top 15 GO Terms – Upregulated in WSPDsa 1 Day"
+  ) +
+  theme_minimal(base_size = 13)
+
+go_down_df <- as.data.frame(go_down)
+go_down_df <- go_down_df[order(-go_down_df$Count), ]
+go_down_top <- go_down_df[1:15, ]
+
+ggplot(go_down_top, aes(x = reorder(Description, Count), y = Count)) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(
+    x = "GO Term",
+    y = "Gene Count",
+    title = "Top 15 GO Terms – Downregulated in WSPDsa 1 Day"
+  ) +
+  theme_minimal(base_size = 13)
+
+
+```
+
+
+
+
+
+
+
+
 
 
 
