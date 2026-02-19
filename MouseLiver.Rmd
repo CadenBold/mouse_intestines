@@ -18,6 +18,14 @@ library(DOSE)
 library(readxl)
 library(AnnotationDbi)
 library(stringr)
+library(dplyr)
+library(pheatmap)
+library(umap)
+library(plotly)
+library(fgsea)
+library(caret)
+library(glmnet)
+library(xgboost)
 ```
 
 
@@ -51,7 +59,7 @@ ids <- data.frame(ensembl_ids = rownames(fc), stringsAsFactors = FALSE)
 ids$clean_ensembl <- str_remove(ids$ensembl_ids, "\\.\\d+$")
 
 # 3. Query annotations
-annotations <- select(org.Mm.eg.db,
+annotations <- AnnotationDbi::select(org.Mm.eg.db,
                       keys = unique(ids$clean_ensembl),
                       columns = c("SYMBOL", "GENENAME", "ENTREZID"),
                       keytype = "ENSEMBL")
@@ -86,6 +94,13 @@ meta %>%
   distinct(Age, Exposure, Diet, Treatment, GroupID) %>%
   arrange(GroupID)
 
+meta$SampleID <- rownames(meta)
+
+
+meta <- meta %>%
+  mutate(
+    plot_group = paste0(Exposure,Diet,Treatment, " ", Age)
+  )
 ```
 Now we want to compute basic DESeq2 Object and Limma Object, with transforms of scale and quantile.
 ```{r}
@@ -1647,6 +1662,337 @@ ggplot(go_down_top, aes(x = reorder(Description, Count), y = Count)) +
 
 
 ```
+
+
+Recreating Jennifers Poster Top 5 Genes Graph
+Please Run DDS with all the differing conditions
+```{r}
+resultsNames(dds)
+terms <- setdiff(resultsNames(dds),"Intercept")
+
+terms[1]
+
+res <- results(dds, name = terms[1])
+res <- as.data.frame(res)
+res$ENSEMBL <- rownames(res)
+
+# List of Genes that we will exclude from the top genes list
+exclude <- res[!is.na(res$padj) & res$padj < 0.05, ]
+
+# List of Woodsmoke Genes that are significant
+res <- results(dds, name = terms[3])
+res <- as.data.frame(res)
+res$ENSEMBL <- rownames(res)
+
+sig <- res[!is.na(res$padj) & res$padj < 0.05, ]
+
+# Filtering for only top genes in exposure
+exposure_genes <- sig[!sig$ENSEMBL %in% exclude$ENSEMBL, ]
+
+res <- results(dds, name = terms[2])
+res <- as.data.frame(res)
+res$ENSEMBL <- rownames(res)
+
+sig <- res[!is.na(res$padj) & res$padj < 0.05, ]
+
+common_genes <- intersect(exposure_genes$ENSEMBL,sig$ENSEMBL)
+exposure_genes <- exposure_genes[exposure_genes$ENSEMBL %in% common_genes, ]
+exposure_genes <- exposure_genes[order(exposure_genes$padj),]
+
+# Now we need to map these to their according gene names
+exposure_genes$clean_ensembl <- str_remove(exposure_genes$ENSEMBL, "\\.\\d+$")
+exposure_genes$SYMBOL <- ids$SYMBOL[match(exposure_genes$clean_ensembl, ids$clean_ensembl)]
+
+
+exposure_genes <- exposure_genes[!is.na(exposure_genes$SYMBOL) & exposure_genes$SYMBOL != "", ]
+head(exposure_genes$SYMBOL)
+
+# Now we just need to plot all of this with our different groups
+expr <- assay(vsd)
+rownames(expr) <- str_remove(rownames(expr), "\\.\\d+$")
+
+expr <- expr[ids$clean_ensembl[ids$SYMBOL %in% exposure_genes$SYMBOL[1:5]],,drop=FALSE]
+rownames(expr) <- ids$SYMBOL[match(rownames(expr),ids$clean_ensembl)]
+
+expr_long <- as.data.frame(expr) %>%
+  mutate(SYMBOL = rownames(.)) %>%
+  pivot_longer(
+    cols = -SYMBOL,
+    names_to = "sample",
+    values_to = "expression"
+  )
+
+expr_long <- expr_long %>%
+  left_join(meta, by = c("sample" = "SampleID"))
+
+meta$plot_group
+
+groups_keep <- c(
+  "FAPDsa 1 day",
+  "FAWDsa 1 day",
+  "WSPDsa 1 day",
+  "WSWDsa 1 day",
+  "FAPDsa 28 day",
+  "WSPDsa 28 day",
+  "FAWDsa 28 day",
+  "WSWDsa 28 day"
+)
+
+expr_long <- expr_long %>%
+  filter(plot_group %in% groups_keep)
+
+expr_long$plot_group <- factor(
+  expr_long$plot_group,
+  levels = groups_keep
+)
+
+options(
+  repr.plot.width  = 14,
+  repr.plot.height = 8
+)
+
+ggplot(expr_long, aes(x = plot_group, y = expression, color = plot_group)) +
+  stat_summary(
+  fun = mean,
+  geom = "crossbar",
+  width = 0.6,
+  color = "black",
+  linewidth = 0.5
+) +
+geom_jitter(
+  width = 0.15,
+  size = 3,
+  alpha = 0.8
+) +
+  facet_wrap(~ SYMBOL, scales = "free_y") +
+  theme_classic(base_size = 13) +
+   theme(
+    panel.grid.major.y = element_line(color = "grey85", linewidth = 0.5),
+    panel.grid.minor.y = element_line(color = "grey90", linewidth = 0.25),
+    panel.grid.major.x = element_line(color = "grey88", linewidth = 0.4),
+    panel.grid.minor.x = element_blank(),
+    axis.text.x = element_text(angle = 45, vjust = 1.09, hjust = 1),
+    strip.background = element_blank(),
+    strip.text = element_text(face = "bold"),
+    legend.position = c(1, 0),      # bottom right
+    legend.justification = c(1, 0),
+    legend.background = element_rect(fill = "white", color = "black"),  # optional border
+    legend.title = element_text(face = "bold"),
+    legend.text = element_text(size = 11)
+  )  +
+  labs(
+    x = "Exposure / Age Group",
+    y = "VST Normalized Expression",
+    color = "Group",
+    title = "Top 5 Exposure-Specific Genes"
+  )
+
+head(exposure_genes)
+```
+
+```{r}
+
+top_genes_all <- lapply(
+  setdiff(resultsNames(dds), "Intercept"),
+  function(coef_name) {
+
+    res <- results(dds, name = coef_name) %>%
+      as.data.frame() %>%
+      rownames_to_column("ENSEMBL") %>%
+      filter(!is.na(padj), padj < 0.05) %>%
+      arrange(desc(abs(log2FoldChange))) %>%
+      slice_head(n = 10) %>%
+      mutate(term = coef_name)
+
+    res
+  }
+)
+
+top_genes_all <- bind_rows(top_genes_all)
+
+print(top_genes_all)
+top_genes_all$clean_ensembl <- str_remove(top_genes_all$ENSEMBL, "\\.\\d+$")
+top_genes_all$SYMBOL <- ids$SYMBOL[match(top_genes_all$clean_ensembl, ids$clean_ensembl)]
+
+top_genes_all <- top_genes_all[!is.na(top_genes_all$SYMBOL) & top_genes_all$SYMBOL != "", ]
+print(top_genes_all$SYMBOL)
+
+vst_sub <- vst_df[rownames(vst_df) %in% top_genes_all$ENSEMBL, , drop = FALSE]
+
+rownames(vst_sub) <- top_genes_all$SYMBOL[
+  match(rownames(vst_sub), top_genes_all$ENSEMBL)
+]
+
+vst_scaled <- t(scale(t(vst_sub)))
+
+vst_long <- vst_sub %>%
+  as.data.frame() %>%
+  mutate(SYMBOL = rownames(.)) %>%
+  pivot_longer(
+    cols = -SYMBOL,
+    names_to = "SampleID",
+    values_to = "expression"
+  )
+
+head(meta)
+meta$plot_group
+# Join metadata (plot_group and groupID)
+
+vst_long <- vst_long %>%
+  mutate(SampleID_numeric = as.character(as.integer(str_remove(SampleID, "^Yim-"))))
+
+
+vst_long <- vst_long %>%
+  left_join(dplyr::select(meta, SampleID, plot_group, GroupID), 
+            by = c("SampleID_numeric" = "SampleID"))
+
+
+print(head(vst_long))
+
+avg_df <- vst_long %>%
+  group_by(SYMBOL, plot_group) %>%
+  summarise(avg_expression = mean(expression), .groups = "drop")
+
+avg_mat <- avg_df %>%
+  pivot_wider(names_from = plot_group, values_from = avg_expression) %>%
+  column_to_rownames("SYMBOL") %>%
+  as.matrix()
+
+avg_scaled <- t(scale(t(avg_mat)))
+
+
+pheatmap(avg_scaled)
+
+
+```
+Trying out umap for maybe different visualisation techniques
+```{r}
+vst_umap <- umap(vst)
+
+```
+
+```{r}
+#head(vst_umap)
+
+umap_df <- as.data.frame(vst_umap$layout)
+colnames(umap_df) <- c("UMAP1", "UMAP2")
+
+#umap_df$SampleID <- colnames(vst)
+head(umap_df)
+
+umap_df$ensembl <- rownames(umap_df)
+
+
+print(summary(umap_df))
+
+plot(umap_df$UMAP1,umap_df$UMAP2)
+
+# Need to look into classification of genes into potential categories 
+# Otherwise cannot look into this one
+```
+
+Sample Level UMAp
+```{r}
+vst_t <- t(vst)
+
+vst_umap_samples <- umap(vst_t, n_components = 3, random_state=52)
+
+```
+
+Analysis
+```{r}
+
+head(rownames(vst_umap_samples$layout))
+# Example output: "Yim-001", "Yim-002", ...
+
+# Make meta$SampleID match this format
+meta$SampleID <- paste0("Yim-", sprintf("%03d", 1:nrow(meta)))
+
+# Now create umap_sample_df
+umap_sample_df <- as.data.frame(vst_umap_samples$layout)
+colnames(umap_sample_df) <- c("UMAP1", "UMAP2","UMAP3")
+umap_sample_df$SampleID <- rownames(umap_sample_df)
+
+# Merge by SampleID
+umap_sample_df <- merge(umap_sample_df, meta, by = "SampleID")
+
+head(umap_sample_df)
+
+ggplot(umap_sample_df, aes(x = UMAP1, y = UMAP2, color = plot_group0055548487878787)) +
+  geom_point(size = 3) +
+  theme_minimal()
+```
+
+```{r}
+plot_ly(umap_sample_df, x=~UMAP1,y=~UMAP2,z=~UMAP3,color=~Group,type="scatter3d",mode="markers",marker=list(size=4))
+```
+
+
+Looking at GSEA now
+```{r}
+res <- results(dds, name="Exposure_WS_vs_FA")
+res <- res[!is.na(res$stat),]
+
+gene_ranks <- res$stat
+names(gene_ranks) <- rownames(res)
+
+gene_ranks <- sort(gene_ranks, decreasing = TRUE)
+
+
+gene_df <- data.frame(
+  ensembl_ids = names(gene_ranks),
+  stat = gene_ranks,
+  stringsAsFactors = FALSE
+)
+
+gene_df$clean_ensembl <- str_remove(gene_df$ensembl_ids,"\\.\\d+$")
+
+gene_df$ENTREZID <- ids$ENTREZID[match(gene_df$clean_ensembl, ids$clean_ensembl)]
+
+gene_df <- gene_df[!is.na(gene_df$ENTREZID) & gene_df$ENTREZID != "",]
+
+# Order by absolute stat (largest effect first)
+gene_df <- gene_df[order(abs(gene_df$stat), decreasing = TRUE), ]
+
+# Remove duplicate ENTREZ IDs (keep first = strongest signal)
+gene_df <- gene_df[!duplicated(gene_df$ENTREZID), ]
+
+gene_ranks <- gene_df$stat
+names(gene_ranks) <- gene_df$ENTREZID
+
+gene_ranks <- sort(gene_ranks, decreasing = TRUE)
+
+
+```
+
+After cleaning and prepping our thing, now we can do gsea
+```{r}
+gsea_res <- gseGO(
+  geneList = gene_ranks,
+  OrgDb = org.Mm.eg.db,
+  ont = "BP",
+  keyType = "ENTREZID"
+)
+
+```
+Visualizations now
+```{r}
+dotplot(gsea_res, showCategory = 10)
+
+gsea_df <- as.data.frame(gsea_res)
+head(gsea_df)
+
+# GSeaplot analysis for specific geneSETIDs
+gseaplot2(gsea_res, geneSetID = "GO:0006631")
+
+```
+
+
+
+
+
+
+
 
 
 

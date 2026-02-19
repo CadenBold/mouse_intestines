@@ -1,6 +1,6 @@
 # Inputs to change entire script
 graph_title <- "PCA of Samples without Sample 9 and 48"
-pc <- "PC2"
+pc <- "PC1"
 keep<- meta$Liver.. != 9 & meta$Liver.. != 48
 
 print(keep)

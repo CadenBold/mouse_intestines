@@ -1,16 +1,45 @@
 head(meta)
+control_group <- "WSPDsa 1 Day"
+test_group <- "FAWDsa 1 Day"
 
-meta_test <- meta[
-  meta$Age == "1 day" &
-    meta$Treatment == "sa" &
-    meta$Diet %in% c("PD", "WD") &
-    meta$Exposure == "FA",
-]
+# Helper Function that looks at the control group and test group input
+# and is able to extract the group and age parts of the string
+parse_group_label <- function(label) {
+  parts <- strsplit(label, " ")[[1]]
+  list(
+    group = parts[1],
+    age   = tolower(paste(parts[2], parts[3]))
+  )
+}
 
-meta_test <- meta_test[-c(5),]
 
+ctrl <- parse_group_label(control_group)
+test <- parse_group_label(test_group)
+
+mask_control <-
+  meta$Group == ctrl$group &
+  meta$Age   == ctrl$age
+
+mask_test <-
+  meta$Group == test$group &
+  meta$Age   == test$age
+
+keep <- mask_control | mask_test
+
+# Removing Sample 9
+keep[9] <- FALSE
+
+meta_test <- meta[keep,]
+
+# Examining The sample groups
 table(meta_test$Age)
 meta_test
+
+meta_test$Group <- relevel(
+  factor(meta_test$Group),
+  ref = ctrl$group
+)
+
 
 count_test <- count_matrix[,rownames(meta_test)]
 
@@ -24,12 +53,17 @@ dds <- DESeqDataSetFromMatrix(
 dds <- dds[rowSums(counts(dds)) >= 10, ]
 dds <- DESeq(dds)
 
-resultsNames(dds)
+interaction_term <- setdiff(
+  resultsNames(dds),
+  "Intercept"
+)
 
+
+interaction_term
 res <- results(dds)
 head(res)
 
-res <- results(dds, name = "Group_FAWDsa_vs_FAPDsa")
+res <- results(dds, name = interaction_term)
 res <- as.data.frame(res)
 res$ENSEMBL <- rownames(res)
 
@@ -62,8 +96,8 @@ top20$SYMBOL <- ids$SYMBOL[match(top20$clean_ensembl, ids$clean_ensembl)]
 top20$LABEL <- ifelse(is.na(top20$SYMBOL), top20$clean_ensembl, top20$SYMBOL)
 
 # classify direction
-top20$Direction <- ifelse(top20$log2FoldChange > 0, "Upregulated in FAWDsa 1 Day", 
-                          "Downregulated in FAWDsa 1 Day")
+top20$Direction <- ifelse(top20$log2FoldChange > 0, paste0("Upregulated in ",test_group), 
+                          paste0("Downregulated in ", test_group))
 
 
 ggplot(top20, aes(x = reorder(LABEL, absLog2FC),
@@ -76,7 +110,7 @@ ggplot(top20, aes(x = reorder(LABEL, absLog2FC),
     x = "Gene Name",
     y = "| log2(FoldChange) |",
     title = "Top 20 Log Fold Genes (Mapped Gene Symbols Only)",
-    subtitle = "FAWDsa 1 Day vs True Control (FAPDsa 1 Day) with Sample 9 Removed"
+    subtitle = paste0(control_group," vs ",test_group)
   ) +
   theme_classic(base_size = 13)
 
@@ -138,8 +172,8 @@ ggplot(go_up_top, aes(x = reorder(Description, Count), y = Count)) +
   labs(
     x = "GO Term",
     y = "Gene Count",
-    title = "Top 15 GO Terms – Upregulated in FAWDsa 1 Day",
-    subtitle="Sample 9 Removed from FAWDsa 1 Day"
+    title = paste0("GO Comparison ",control_group," - Upregulated in ", test_group),
+    subtitle=paste0(control_group, " vs ", test_group)
   ) +
   theme_minimal(base_size = 13)
 
@@ -148,7 +182,7 @@ go_down_df <- as.data.frame(go_down)
 go_down_df <- go_down_df[order(-go_down_df$Count), ]
 go_down_top <- go_down_df[1:15, ]
 
-go_down_top$Description <- str_wrap(go_down_top$Description, width = 40)
+go_down_top$Description <- str_wrap(go_down_top$Description, width = 30)
 
 ggplot(go_down_top, aes(x = reorder(Description, Count), y = Count)) +
   geom_col(fill = "steelblue") +
@@ -156,7 +190,7 @@ ggplot(go_down_top, aes(x = reorder(Description, Count), y = Count)) +
   labs(
     x = "GO Term",
     y = "Gene Count",
-    title = "Top 15 GO Terms – Downregulated in FAWDsa 1 Day",
-    subtitle="Sample 9 Removed from FAWDsa 1 Day"
+    title = paste0("GO Comparison ",control_group," - Downregulated in ", test_group),
+    subtitle=paste0(control_group, " vs ", test_group)
   ) +
   theme_minimal(base_size = 13)
