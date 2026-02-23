@@ -26,6 +26,9 @@ library(fgsea)
 library(caret)
 library(glmnet)
 library(xgboost)
+library(WGCNA)
+allowWGCNAThreads()
+library(igraph)
 ```
 
 
@@ -136,6 +139,39 @@ vst_df <- as.data.frame(vst)
 head(vst_df)
 ```
 
+I want to get a dataframe that has the different groups, and the collective averages, stabilizing sample 9 in one and having a column where it is not stabilized
+```{r}
+# compute mean expression per group
+group_matrix <- sapply(unique(meta$plot_group), function(g) {
+  rowMeans(vst[, meta$plot_group == g, drop = FALSE])
+})
+
+group_matrix_z <- t(scale(t(group_matrix)))
+group_matrix_z[is.na(group_matrix_z)] <- 0
+
+group_data <- list(
+  mean = group_matrix,
+  zscore = group_matrix_z
+)
+
+```
+
+```{r}
+top_genes <- apply(group_matrix_z, 2, function(col) {
+  names(sort(col, decreasing = TRUE))[1:5]
+})
+
+top_genes <- unique(as.vector(top_genes))
+
+heatmap_matrix <- group_data$zscore[top_genes, ]
+
+pheatmap::pheatmap(
+  heatmap_matrix,
+  cluster_rows = TRUE,
+  cluster_cols = TRUE,
+  show_rownames = TRUE
+)1
+```
 
 
 Limma Array Initializing
@@ -993,7 +1029,7 @@ umap_sample_df <- merge(umap_sample_df, meta, by = "SampleID")
 
 head(umap_sample_df)
 
-ggplot(umap_sample_df, aes(x = UMAP1, y = UMAP2, color = plot_group0055548487878787)) +
+ggplot(umap_sample_df, aes(x = UMAP1, y = UMAP2, color = plot_group)) +
   geom_point(size = 3) +
   theme_minimal()
 ```
@@ -1061,6 +1097,125 @@ head(gsea_df)
 gseaplot2(gsea_res, geneSetID = "GO:0006631")
 
 ```
+
+This is getting the matrix for the counts and then removing sample 9
+```{r}
+dataExpr <- vst[,-9]
+print(colnames(dataExpr))
+dataExpr <- t(dataExpr)
+
+
+
+traits <- meta %>% select(Exposure,Diet,Treatment,Age)
+traits <- traits %>% mutate(across(everything(), ~ as.numeric(as.factor(.))))
+traits <- traits[-9,]
+print(traits)
+```
+
+
+Now conducting WGCNA to hopefully create a network that we can connect and view for biological intrepretation
+```{r}
+
+
+gene_var <- apply(dataExpr,2,var)
+keep <- gene_var > quantile(gene_var,0.75)
+dataExpr <- dataExpr[,keep]
+
+gsg <- goodSamplesGenes(dataExpr,verbose=3)
+dataExpr <- dataExpr[gsg$goodSamples, gsg$goodGenes]
+
+powers <- 1:20
+sft <- pickSoftThreshold(dataExpr,powerVector=powers, verbose = 5)
+softPower <- 6
+
+net <- blockwiseModules(
+  dataExpr,
+  power = softPower,
+  TOMType = "signed",
+  minModuleSize = 30,
+  mergeCutHeight = 0.25,
+  numericLabels = TRUE,
+  pamRespectsDendro = FALSE,
+  verbose = 3
+)
+
+moduleColors <- labels2colors(net$colors)
+
+```
+
+```{r}
+MEs <- net$MEs
+MEs <- orderMEs(MEs)
+
+moduleTraitCor <- cor(MEs, traits, use = "p")
+moduleTraitPvalue <- corPvalueStudent(moduleTraitCor, nrow(dataExpr))
+
+# Heatmap of module-trait correlations
+labeledHeatmap(
+  Matrix = moduleTraitCor,
+  xLabels = colnames(traits),
+  yLabels = names(MEs),
+  colors = blueWhiteRed(50),
+  textMatrix = signif(moduleTraitCor, 2),
+  main = "Module-trait relationships"
+)
+
+# use numeric labels directly
+numericMods <- net$colors  # numeric labels
+MEs <- net$MEs             # column names like ME1, ME2
+
+hub_genes_list <- list()
+hub_scores <- c()
+
+for (modNum in unique(numericMods)) {
+  moduleGenes <- numericMods == modNum
+  MEname <- paste0("ME", modNum)
+  kME <- cor(dataExpr[, moduleGenes], MEs[, MEname], use = "p")
+  
+  n_top <- ceiling(0.01*sum(moduleGenes))
+  top_hubs <- names(sort(kME[,1], decreasing = TRUE))[1:n_top]
+  hub_genes_list[[MEname]] <- top_hubs
+  hub_scores <- c(hub_scores, kME[top_hubs, 1])
+}
+# flatten hub genes from all modules
+top_genes <- unique(unlist(hub_genes_list))
+hub_scores <- hub_scores[match(top_genes, names(hub_scores))]
+# adjacency matrix
+cor_mat <- cor(dataExpr[, top_genes], use="p")  # Pearson correlation
+adj_mat <- abs(cor_mat)^softPower  # weighted adjacency
+
+# optionally threshold adjacency for plotting clarity
+adj_mat[adj_mat < 0.2] <- 0
+
+pheatmap(adj_mat, cluster_rows = TRUE, cluster_cols = TRUE)
+```
+
+```{r}
+g <- graph_from_adjacency_matrix(adj_mat, mode = "undirected", weighted = TRUE, diag = FALSE)
+
+# Color nodes by module
+V(g)$color <- moduleColors[match(V(g)$name, colnames(dataExpr))]
+
+# Scale node size by hub score
+V(g)$size <- 5 + 10 * hub_scores[match(V(g)$name, top_genes)]
+
+# Remove labels
+V(g)$label <- NA
+
+plot(g,
+     vertex.size = V(g)$size,
+     vertex.color = V(g)$color,
+     edge.width = E(g)$weight * 2,
+     main = "Top Hub Gene Network"
+)
+```
+
+To DO List:
+Clean up the network graph and extract biological meaning by either putting pathways or actual gene names on the graph
+Do correlation graphs, with gene-gene correlations and gene-trait correlations
+
+
+
 
 
 
