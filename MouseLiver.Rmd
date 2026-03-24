@@ -32,6 +32,20 @@ library(igraph)
 library(openxlsx)
 ```
 
+```{r}
+theme_set(
+  theme_classic(base_size = 14, base_family = "Arial") +
+    theme(
+      plot.title = element_text(face = "bold"),
+      axis.title = element_text(size = 14),
+      axis.text = element_text(size = 12),
+      legend.title = element_text(face = "bold"),
+      panel.grid.minor = element_blank()
+    )
+)
+```
+
+
 
 ```{r}
 FastP_featurecounts <- read.csv("data/FastP_featurecounts.csv")
@@ -138,7 +152,124 @@ vst <- assay(vsd)
 
 vst_df <- as.data.frame(vst)
 head(vst_df)
+
+terms <- resultsNames(dds)
+terms <- terms[-1]
+print(terms)
 ```
+Volcano plots of the deseq2 object
+```{r}
+resultsNames(dds)
+terms <- resultsNames(dds)
+
+res <- results(dds,name=terms[2])
+
+res <- as.data.frame(res)
+# Need to clean the res dataframe
+res <- res[complete.cases(res[,c("pvalue")]),]
+res$color <- "gray"
+
+res$color[res$pvalue < 0.05 & res$log2FoldChange > 1] <- "red"
+res$color[res$pvalue < 0.05 & res$log2FoldChange < -1] <- "blue"
+
+sig <- c(sum(res$color == "blue"))
+sig[2] <- sum(res$color == "red")
+sig[3] <- sum(res$color=="gray")
+
+annot <- data.frame(
+  x = c(-10, -10, -10),   # x-position of labels
+  y = c(15, 14, 13),  # y-position (stack vertically)
+  label = c(
+    paste("Down:", sig[1]),
+    paste("Up:", sig[2]),
+    paste("NS:", sig[3])
+  ),
+  color = c("blue", "red", "black")
+)
+
+head(res,20)
+
+ggplot(res, aes(x=log2FoldChange,y=-log10(pvalue), color=color)) +
+  geom_point(size=2.5,alpha=0.85)+
+  geom_hline(yintercept=-log10(0.05), linetype="dashed")+
+  geom_vline(xintercept=c(-1,1),linetype="dashed")+
+  scale_color_identity()+ 
+   geom_text(
+    data = annot,
+    aes(x = x, y = y, label = label, color = color),
+    inherit.aes = FALSE,
+    size = 5
+  )+
+  labs(x = "log2FoldChange",
+       title=paste0("Volcano Plot of ", terms[2])) +
+  theme_classic()
+
+```
+
+Function that given the dds object and experiment name, it will create the volcano plot for any upregulated and downregulated genes in the differential expression.
+```{r}
+volcano_plot <- function(dds, exp_name){
+
+res <- results(dds,name=exp_name)
+
+res <- as.data.frame(res)
+# Need to clean the res dataframe
+res <- res[complete.cases(res[,c("pvalue")]),]
+res$color <- "gray"
+
+res$color[res$pvalue < 0.05 & res$log2FoldChange > 1] <- "red"
+res$color[res$pvalue < 0.05 & res$log2FoldChange < -1] <- "blue"
+
+sig <- c(sum(res$color == "blue"))
+sig[2] <- sum(res$color == "red")
+sig[3] <- sum(res$color=="gray")
+
+annot <- data.frame(
+  x = c(-10, -10, -10),   # x-position of labels
+  y = c(15, 14, 13),  # y-position (stack vertically)
+  label = c(
+    paste("Down:", sig[1]),
+    paste("Up:", sig[2]),
+    paste("NS:", sig[3])
+  ),
+  color = c("blue", "red", "black")
+)
+
+head(res,20)
+
+p <- ggplot(res, aes(x=log2FoldChange,y=-log10(pvalue), color=color)) +
+  geom_point(size=2.5,alpha=0.85)+
+  geom_hline(yintercept=-log10(0.05), linetype="dashed")+
+  geom_vline(xintercept=c(-1,1),linetype="dashed")+
+  scale_color_identity()+ 
+   geom_text(
+    data = annot,
+    aes(x = x, y = y, label = label, color = color),
+    inherit.aes = FALSE,
+    size = 5
+  )+
+  labs(x = "log2FoldChange",
+       title=paste0("Volcano Plot of ", exp_name)) +
+  theme_classic()
+  return(p)
+}
+```
+
+```{r}
+volcanoplots <- list()
+for(item in terms){
+  volcanoplots[[item]] <- volcano_plot(dds, item)
+}
+```
+
+
+```{r}
+head(volcanoplots)
+```
+
+
+
+
 
 I want to get a dataframe that has the different groups, and the collective averages, stabilizing sample 9 in one and having a column where it is not stabilized
 ```{r}
@@ -171,7 +302,7 @@ pheatmap::pheatmap(
   cluster_rows = TRUE,
   cluster_cols = TRUE,
   show_rownames = TRUE
-)1
+)
 ```
 
 Want to do a heatmap for general study and quick overview for the paper
@@ -255,7 +386,7 @@ plot_density_with_colored_outliers(
   mat = vst_df,
   title = "VST Density (DESeq2 Variance Stabilized Transform)",
   log_transform = FALSE,
-  xlim_zoom = c(5, 6),
+  xlim_zoom = c(4.857424, 7),
   ylim_zoom = c(0, 0.6)
 )
 
@@ -610,13 +741,18 @@ ggplot(top_pc2,
 
 ```
 
+```{r}
+head(meta)
+```
+
+
 Want to do GO enrichment and find top 20 genes of true control 1d vs WSPDsa 1d
 ```{r}
 meta_test <- meta[
-  meta$Age == "1 day" &
+  meta$Age %in% c("1 day","28 day") &
   meta$Treatment == "sa" &
   meta$Diet == "PD" &
-  meta$Exposure %in% c("FA", "WS"),
+  meta$Exposure == "WS",
 ]
 
 table(meta_test$Exposure, meta_test$Age)
@@ -627,7 +763,7 @@ count_test <- count_matrix[,rownames(meta_test)]
 dds <- DESeqDataSetFromMatrix(
   countData = count_test,
   colData   = meta_test,
-  design    = ~ Group
+  design    = ~ plot_group
 )
 
 #Potential Filtering Option
@@ -641,9 +777,15 @@ head(res)
 ```
 
 ```{r}
-res <- results(dds, name = "Group_WSPDsa_vs_FAPDsa")
+res <- results(dds, name = "plot_group_WSPDsa.28.day_vs_WSPDsa.1.day")
 res <- as.data.frame(res)
 res$ENSEMBL <- rownames(res)
+
+
+
+# Swapping Order so it should be 1 day vs 28 day instead of 28 day vs 1 day
+res$log2FoldChange <- -res$log2FoldChange
+
 
 # keep only significant genes
 sig <- res[!is.na(res$padj) & res$padj < 0.05, ]
@@ -678,7 +820,7 @@ top20$SYMBOL <- ids$SYMBOL[match(top20$clean_ensembl, ids$clean_ensembl)]
 top20$LABEL <- ifelse(is.na(top20$SYMBOL), top20$clean_ensembl, top20$SYMBOL)
 
 # classify direction
-top20$Direction <- ifelse(top20$log2FoldChange > 0, "Upregulated in WSPDsa", "Downregulated in WSPDsa")
+top20$Direction <- ifelse(top20$log2FoldChange > 0, "Upregulated in WSPDsa 28 day", "Downregulated in WSPDsa 28 day")
 
 
 ggplot(top20, aes(x = reorder(LABEL, absLog2FC),
@@ -691,7 +833,7 @@ ggplot(top20, aes(x = reorder(LABEL, absLog2FC),
     x = "Gene Name",
     y = "| log2(FoldChange) |",
     title = "Top 20 Log Fold Genes (Mapped Gene Symbols Only)",
-    subtitle = "WSPDsa 1 Day vs True Control (FAPDsa 1 Day)"
+    subtitle = "WSPDsa 1 Day vs WSPDsa 28 Day"
   ) +
   theme_classic(base_size = 13)
 
@@ -741,38 +883,43 @@ go_down <- enrichGO(
 
 ```{r}
 go_up_df <- as.data.frame(go_up)
+print(head(go_up_df))
 
-# sort by Count descending
-go_up_df <- go_up_df[order(-go_up_df$Count), ]
+# sort by padj ascending
+go_up_df <- go_up_df[order(go_up_df$p.adjust), ]
 
 # pick top N categories
 topN <- 15
 go_up_top <- go_up_df[1:topN, ]
 
 
-ggplot(go_up_top, aes(x = reorder(Description, Count), y = Count)) +
-  geom_col(fill = "steelblue") +
+ggplot(go_up_top, aes(x = reorder(Description, -p.adjust), y = Count, fill=p.adjust)) +
+  geom_col() +
+  scale_fill_gradient(low="#F8766D",high="#619CFF") +
   coord_flip() +
   labs(
     x = "GO Term",
     y = "Gene Count",
-    title = "Top 15 GO Terms – Upregulated in WSPDsa 1 Day"
+    title = "Top 15 GO Terms – Upregulated in WSPDsa 28 Day"
   ) +
-  theme_minimal(base_size = 13)
+  theme_classic(base_size = 13)
 
 go_down_df <- as.data.frame(go_down)
-go_down_df <- go_down_df[order(-go_down_df$Count), ]
+go_down_df <- go_down_df[order(go_down_df$p.adjust), ]
 go_down_top <- go_down_df[1:15, ]
 
-ggplot(go_down_top, aes(x = reorder(Description, Count), y = Count)) +
-  geom_col(fill = "steelblue") +
+print(head(go_down_df))
+
+ggplot(go_down_top, aes(x = reorder(Description, -p.adjust), y = Count, fill=p.adjust)) +
+  geom_col() +
+  scale_fill_gradient(low="#F8766D",high = "#619CFF")+
   coord_flip() +
   labs(
     x = "GO Term",
     y = "Gene Count",
-    title = "Top 15 GO Terms – Downregulated in WSPDsa 1 Day"
+    title = "Top 15 GO Terms – Downregulated in WSPDsa 28 Day"
   ) +
-  theme_minimal(base_size = 13)
+  theme_classic(base_size = 13)
 
 
 ```
@@ -1042,64 +1189,152 @@ plot_ly(umap_sample_df, x=~UMAP1,y=~UMAP2,z=~UMAP3,color=~Group,type="scatter3d"
 ```
 
 
-Looking at GSEA now
+Creating function to run through DDS object with every experiment in the dds object and creating a dotplot for each one
 ```{r}
-res <- results(dds, name="Exposure_WS_vs_FA")
-res <- res[!is.na(res$stat),]
 
-gene_ranks <- res$stat
-names(gene_ranks) <- rownames(res)
+gsea_enrich <- function(dds, exp_name, ids, top=10){
+  res <- results(dds, name=exp_name)
+  res <- res[!is.na(res$stat),]
+  
+  gene_ranks <- res$stat
+  names(gene_ranks) <- rownames(res)
+  gene_ranks <- sort(gene_ranks,decreasing=TRUE)
+  
+  gene_df <- data.frame(ensembl_ids = names(gene_ranks),
+                        stat = gene_ranks,
+                        stringsAsFactors = FALSE)
+  gene_df$clean_ensembl <- str_remove(gene_df$ensembl_ids,"\\.\\d+$")
 
-gene_ranks <- sort(gene_ranks, decreasing = TRUE)
+  gene_df$ENTREZID <- ids$ENTREZID[match(gene_df$clean_ensembl, ids$clean_ensembl)]
 
+  gene_df <- gene_df[!is.na(gene_df$ENTREZID) & gene_df$ENTREZID != "",]
 
-gene_df <- data.frame(
-  ensembl_ids = names(gene_ranks),
-  stat = gene_ranks,
-  stringsAsFactors = FALSE
-)
+  # Order by absolute stat (largest effect first)
+  gene_df <- gene_df[order(abs(gene_df$stat), decreasing = TRUE), ]
 
-gene_df$clean_ensembl <- str_remove(gene_df$ensembl_ids,"\\.\\d+$")
+  # Remove duplicate ENTREZ IDs (keep first = strongest signal)
+  gene_df <- gene_df[!duplicated(gene_df$ENTREZID), ]
 
-gene_df$ENTREZID <- ids$ENTREZID[match(gene_df$clean_ensembl, ids$clean_ensembl)]
+  gene_ranks <- gene_df$stat
+  names(gene_ranks) <- gene_df$ENTREZID
 
-gene_df <- gene_df[!is.na(gene_df$ENTREZID) & gene_df$ENTREZID != "",]
-
-# Order by absolute stat (largest effect first)
-gene_df <- gene_df[order(abs(gene_df$stat), decreasing = TRUE), ]
-
-# Remove duplicate ENTREZ IDs (keep first = strongest signal)
-gene_df <- gene_df[!duplicated(gene_df$ENTREZID), ]
-
-gene_ranks <- gene_df$stat
-names(gene_ranks) <- gene_df$ENTREZID
-
-gene_ranks <- sort(gene_ranks, decreasing = TRUE)
-
-
-```
-
-After cleaning and prepping our thing, now we can do gsea
-```{r}
-gsea_res <- gseGO(
+  gene_ranks <- sort(gene_ranks, decreasing = TRUE)
+  
+  gsea_res <- gseGO(
   geneList = gene_ranks,
   OrgDb = org.Mm.eg.db,
   ont = "BP",
-  keyType = "ENTREZID"
+  keyType = "ENTREZID",
+  BPPARAM = BiocParallel::SerialParam()
+  )
+  
+  gsea_df <- as.data.frame(gsea_res)
+  
+  gsea_df <- gsea_df %>% arrange(p.adjust) %>% slice_head(n=top)
+  gsea_df$p_label <- paste0("padj = ", signif(gsea_df$p.adjust,3))
+  
+  gsea_df$Direction <- ifelse(gsea_df$NES > 0,
+                            "Upregulated",
+                            "Suppressed")
+  
+  p <- ggplot(gsea_df, aes(x=reorder(Description,NES), y=NES,fill=p.adjust)) +
+    geom_col() +
+    coord_flip() +
+    scale_fill_gradient(low="#F8766D",high="#619CFF")+
+    labs(
+    x = "Pathways/Labels",
+    y = "Normalized Enrichment Score (NES)",
+    title = paste0("GSEA Enrichment of ", exp_name),
+    fill = "Direction"
+    ) +
+    expand_limits(y = max(abs(gsea_df$NES)) * 1.3) +
+    theme_classic()
+  
+  return(p)
+}
+```
+
+```{r}
+plots <- list()
+
+for (term in terms) {
+  plots[[term]] <- gsea_enrich(dds, term, ids)
+}
+#gsea_enrich(dds,"Age_28.day_vs_1.day",ids)
+```
+
+```{r}
+head(plots)
+```
+
+```{r}
+head(meta)
+control_group <- "FAPDsa 1 day"
+test_group <- "WSPDsa 1 day"
+
+# Helper Function that looks at the control group and test group input
+# and is able to extract the group and age parts of the string
+parse_group_label <- function(label) {
+  parts <- strsplit(label, " ")[[1]]
+  list(
+    group = parts[1],
+    age   = tolower(paste(parts[2], parts[3]))
+  )
+}
+
+
+ctrl <- parse_group_label(control_group)
+test <- parse_group_label(test_group)
+
+mask_control <-
+  meta$Group == ctrl$group &
+  meta$Age   == ctrl$age
+
+mask_test <-
+  meta$Group == test$group &
+  meta$Age   == test$age
+
+keep <- mask_control | mask_test
+
+# Removing Sample 9
+#keep[9] <- FALSE
+
+meta_test <- meta[keep,]
+
+# Examining The sample groups
+table(meta_test$Age)
+meta_test
+
+meta_test$Group <- relevel(
+  factor(meta_test$Group),
+  ref = ctrl$group
 )
 
+
+count_test <- count_matrix[,rownames(meta_test)]
+
+dds <- DESeqDataSetFromMatrix(
+  countData = count_test,
+  colData   = meta_test,
+  design    = ~ plot_group
+)
+
+#Potential Filtering Option
+dds <- dds[rowSums(counts(dds)) >= 10, ]
+dds <- DESeq(dds)
 ```
-Visualizations now
+
 ```{r}
-dotplot(gsea_res, showCategory = 10)
-
-gsea_df <- as.data.frame(gsea_res)
-head(gsea_df)
-
-# GSeaplot analysis for specific geneSETIDs
-gseaplot2(gsea_res, geneSetID = "GO:0006631")
-
+term0 <- resultsNames(dds)
+term0[2]
+plot <- gsea_enrich(dds,term0[2],ids,15)
 ```
+
+```{r}
+plot
+```
+
+
 
 This is getting the matrix for the counts and then removing sample 9
 ```{r}
@@ -1395,13 +1630,7 @@ pheatmap(
 To DO List:
 Clean up the network graph and extract biological meaning by either putting pathways or actual gene names on the graph
 Do correlation graphs, with gene-gene correlations and gene-trait correlations
-
-
-
-
-
-
-
+Look into the sex differences of mice and see if there is any female specific genes we to exclude from the study, or be filtered in some other parts of the analyis so it does not show up implicity in different parts of the analysis like in the GO enrichment.
 
 
 

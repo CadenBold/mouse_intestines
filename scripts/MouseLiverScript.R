@@ -1,6 +1,6 @@
 head(meta)
-control_group <- "WSPDsa 1 Day"
-test_group <- "FAWDsa 1 Day"
+control_group <- "FAPDsa 1 day"
+test_group <- "FAPDsa 28 day"
 
 # Helper Function that looks at the control group and test group input
 # and is able to extract the group and age parts of the string
@@ -27,7 +27,7 @@ mask_test <-
 keep <- mask_control | mask_test
 
 # Removing Sample 9
-keep[9] <- FALSE
+#keep[9] <- FALSE
 
 meta_test <- meta[keep,]
 
@@ -46,7 +46,7 @@ count_test <- count_matrix[,rownames(meta_test)]
 dds <- DESeqDataSetFromMatrix(
   countData = count_test,
   colData   = meta_test,
-  design    = ~ Group
+  design    = ~ plot_group
 )
 
 #Potential Filtering Option
@@ -63,7 +63,7 @@ interaction_term
 res <- results(dds)
 head(res)
 
-res <- results(dds, name = interaction_term)
+res <- results(dds, contrast=c("plot_group",test_group,control_group))
 res <- as.data.frame(res)
 res$ENSEMBL <- rownames(res)
 
@@ -157,17 +157,18 @@ go_down <- enrichGO(
 go_up_df <- as.data.frame(go_up)
 
 # sort by Count descending
-go_up_df <- go_up_df[order(-go_up_df$Count), ]
+go_up_df <- go_up_df[order(go_up_df$p.adjust), ]
 
 # pick top N categories
 topN <- 15
 go_up_top <- go_up_df[1:topN, ]
 
 
-go_up_top$Description <- str_wrap(go_up_top$Description, width = 40)
+go_up_top$Description <- str_wrap(go_up_top$Description, width = 30)
 
-ggplot(go_up_top, aes(x = reorder(Description, Count), y = Count)) +
-  geom_col(fill = "steelblue") +
+ggplot(go_up_top, aes(x = reorder(Description, -p.adjust), y = Count, fill=p.adjust)) +
+  geom_col() +
+  scale_fill_gradient(low="#F8766D",high="#619CFF") +
   coord_flip() +
   labs(
     x = "GO Term",
@@ -175,17 +176,18 @@ ggplot(go_up_top, aes(x = reorder(Description, Count), y = Count)) +
     title = paste0("GO Comparison ",control_group," - Upregulated in ", test_group),
     subtitle=paste0(control_group, " vs ", test_group)
   ) +
-  theme_minimal(base_size = 13)
+  theme_classic(base_size = 13)
 
 # Wrap text for top 15 downregulated GO terms
 go_down_df <- as.data.frame(go_down)
-go_down_df <- go_down_df[order(-go_down_df$Count), ]
+go_down_df <- go_down_df[order(go_down_df$p.adjust), ]
 go_down_top <- go_down_df[1:15, ]
 
 go_down_top$Description <- str_wrap(go_down_top$Description, width = 30)
 
-ggplot(go_down_top, aes(x = reorder(Description, Count), y = Count)) +
-  geom_col(fill = "steelblue") +
+ggplot(go_down_top, aes(x = reorder(Description, -p.adjust), y = Count, fill=p.adjust)) +
+  geom_col() +
+  scale_fill_gradient(low="#F8766D",high="#619CFF") +
   coord_flip() +
   labs(
     x = "GO Term",
@@ -193,4 +195,4 @@ ggplot(go_down_top, aes(x = reorder(Description, Count), y = Count)) +
     title = paste0("GO Comparison ",control_group," - Downregulated in ", test_group),
     subtitle=paste0(control_group, " vs ", test_group)
   ) +
-  theme_minimal(base_size = 13)
+  theme_classic(base_size = 13)
