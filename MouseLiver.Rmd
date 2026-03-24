@@ -142,8 +142,11 @@ dds <- dds[rowSums(counts(dds)) >= 10, ]
 
 dds <- DESeq(dds)
 
-res <- results(dds)
 
+# Getting results of each basic design pattern along
+# with VST transform for visualization purposes
+# and norm_counts for more indepth looks along with statistical tests
+res <- results(dds)
 res <- res[order(res$padj),]
 head(res)
 
@@ -156,6 +159,8 @@ head(vst_df)
 terms <- resultsNames(dds)
 terms <- terms[-1]
 print(terms)
+
+norm_counts <- counts(dds,normalized=TRUE)
 ```
 Volcano plots of the deseq2 object
 ```{r}
@@ -400,6 +405,29 @@ plot_density_with_colored_outliers(
 
 
 ```
+Doing density plot for DESeq2 Normalized Counts instaed of VST counts
+```{r}
+norm_counts_df <- as.data.frame(norm_counts)
+
+print(head(norm_counts_df))
+
+norm_counts_df <- rownames_to_column(norm_counts_df,var="gene")
+
+norm_counts_df <- norm_counts_df %>% pivot_longer(cols=-gene,names_to="sample", values_to="value")
+
+print(head(norm_counts_df))
+
+ggplot(norm_counts_df, aes(x=log1p(value))) +
+  geom_density()
+```
+Looking at dispersoin plot
+```{r}
+plotDispEsts(dds)
+plotSparsity(dds)
+```
+
+
+
 Computing PCA for DESeq Filtered
 ```{r}
 

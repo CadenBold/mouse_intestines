@@ -51,7 +51,7 @@ dds <- DESeqDataSetFromMatrix(
 
 #Potential Filtering Option
 dds <- dds[rowSums(counts(dds)) >= 10, ]
-dds <- DESeq(dds)
+dds <- DESeq(dds, test="Wald")
 
 interaction_term <- setdiff(
   resultsNames(dds),
